@@ -11,6 +11,18 @@
 
 ## Star History
 
+## 本地使用（推荐）
+
+如果你只是想在**自己电脑本地**使用，而不是部署到服务器，优先看这份文档：
+
+- [本地 Docker Desktop 使用说明](docs/local-docker-desktop.md)
+
+当前项目已经支持：
+- `docker compose up --build`
+- 浏览器访问 `http://localhost:5173`
+- SQLite 数据持久化到本地 `./data` 目录
+
+
 [![Star History Chart](https://api.star-history.com/svg?repos=Kylsky/chatgpt-team-helper&type=Date)](https://star-history.com/#Kylsky/chatgpt-team-helper&Date)
 
 ## 功能特性
@@ -92,7 +104,10 @@
 
 ## 部署
 
-### Docker Compose 部署（推荐）
+### Docker Compose 部署（通用）
+
+> 如果你只是在本机使用，请优先参考：[本地 Docker Desktop 使用说明](docs/local-docker-desktop.md)
+
 
 #### 1. 克隆仓库
 
