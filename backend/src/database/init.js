@@ -329,20 +329,9 @@ const ensureRbacTables = (database) => {
       { key: 'user_info', label: '用户信息', path: '/admin/user-info', sortOrder: 2 },
       { key: 'accounts', label: '账号管理', path: '/admin/accounts', sortOrder: 3 },
       { key: 'redemption_codes', label: '兑换码管理', path: '/admin/redemption-codes', sortOrder: 4 },
-      { key: 'order_management', label: '订单管理', path: '', sortOrder: 6 },
-      { key: 'purchase_orders', label: '支付订单', path: '/admin/purchase-orders', parentKey: 'order_management', sortOrder: 1 },
-      { key: 'xhs_orders', label: '小红书订单', path: '/admin/xhs-orders', parentKey: 'order_management', sortOrder: 2 },
-      { key: 'xianyu_orders', label: '闲鱼订单', path: '/admin/xianyu-orders', parentKey: 'order_management', sortOrder: 3 },
-      { key: 'credit_orders', label: 'Credit 订单', path: '/admin/credit-orders', parentKey: 'order_management', sortOrder: 4 },
-      { key: 'account_recovery', label: '补号管理', path: '/admin/account-recovery', parentKey: 'order_management', sortOrder: 5 },
-      { key: 'permission_management', label: '权限管理', path: '', sortOrder: 7 },
+      { key: 'permission_management', label: '权限管理', path: '', sortOrder: 5 },
       { key: 'user_management', label: '用户管理', path: '/admin/users', parentKey: 'permission_management', sortOrder: 1 },
-      { key: 'role_management', label: '角色管理', path: '/admin/roles', parentKey: 'permission_management', sortOrder: 2 },
-      { key: 'menu_management', label: '菜单管理', path: '/admin/menus', parentKey: 'permission_management', sortOrder: 3 },
-      { key: 'settings', label: '系统设置', path: '/admin/settings', sortOrder: 9 },
-      { key: 'my_orders', label: '我的订单', path: '/admin/my-orders', sortOrder: 10 },
-      { key: 'points_exchange', label: '积分兑换', path: '/admin/points-exchange', sortOrder: 11 },
-      { key: 'waiting_room', label: '候车室管理', path: '/admin/waiting-room', sortOrder: 99, isActive: 0 },
+      { key: 'settings', label: '系统设置', path: '/admin/settings', sortOrder: 6 },
     ]
 
     const menuInfosByKey = new Map()
@@ -428,7 +417,7 @@ const ensureRbacTables = (database) => {
       }
     }
 
-    const superAdminExcludedMenuKeys = new Set(['my_orders', 'points_exchange', 'waiting_room'])
+    const superAdminExcludedMenuKeys = new Set()
     const superAdminRoleCreated = Boolean(superAdminRole?.created)
     if (superAdminRoleId) {
       const menuIds = []
@@ -441,7 +430,7 @@ const ensureRbacTables = (database) => {
       grantRoleMenus(superAdminRoleId, menuIds)
     }
 
-    const defaultUserMenuKeys = ['my_orders', 'user_info', 'points_exchange']
+    const defaultUserMenuKeys = ['user_info']
     const defaultUserRoleCreated = Boolean(defaultUserRole?.created)
     if (defaultUserRoleId) {
       const menuIds = defaultUserMenuKeys
@@ -492,6 +481,31 @@ const ensureRbacTables = (database) => {
         )
         changed = true
       }
+    }
+
+    const allowedMenuKeys = new Set(defaultMenus.map(item => item.key))
+    const removableMenuKeys = [
+      'order_management',
+      'purchase_orders',
+      'xhs_orders',
+      'xianyu_orders',
+      'credit_orders',
+      'account_recovery',
+      'role_management',
+      'menu_management',
+      'my_orders',
+      'points_exchange',
+      'waiting_room'
+    ]
+
+    for (const menuKey of removableMenuKeys) {
+      if (allowedMenuKeys.has(menuKey)) continue
+      const menuResult = database.exec('SELECT id FROM menus WHERE menu_key = ? LIMIT 1', [menuKey])
+      const menuId = Number(menuResult[0]?.values?.[0]?.[0] || 0)
+      if (!Number.isFinite(menuId) || menuId <= 0) continue
+      database.run('DELETE FROM role_menus WHERE menu_id = ?', [menuId])
+      database.run('DELETE FROM menus WHERE id = ?', [menuId])
+      changed = true
     }
   } catch (error) {
     console.warn('[DB] 无法初始化 RBAC 表结构:', error?.message || error)
@@ -1235,7 +1249,7 @@ const ensureChannelsTable = (database) => {
   }
 
   try {
-    const NON_BUILTIN_KEYS = ['paypal', 'artisan-flow']
+    const NON_BUILTIN_KEYS = []
     database.run(
       `UPDATE channels SET is_builtin = 0, updated_at = DATETIME('now', 'localtime') WHERE key IN (${NON_BUILTIN_KEYS.map(() => '?').join(',')}) AND is_builtin = 1`,
       NON_BUILTIN_KEYS
@@ -1244,27 +1258,39 @@ const ensureChannelsTable = (database) => {
     for (const channel of BUILTIN_CHANNELS) {
       if (channelsTableExists && NON_BUILTIN_KEYS.includes(channel.key)) continue
       const existing = database.exec('SELECT id FROM channels WHERE key = ? LIMIT 1', [channel.key])
-      if (existing[0]?.values?.length) continue
+      if (!existing[0]?.values?.length) {
+        database.run(
+          `
+            INSERT INTO channels (
+              key, name, redeem_mode, provider_type, allow_common_fallback, allow_downstream_sale, is_active, is_builtin, sort_order, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+          `,
+          [
+            channel.key,
+            channel.name,
+            channel.redeemMode,
+            channel.providerType || 'local',
+            Number(channel.allowCommonFallback) ? 1 : 0,
+            Number(channel.allowDownstreamSale) ? 1 : 0,
+            Number(channel.isActive) ? 1 : 0,
+            Number(channel.isBuiltin) ? 1 : 0,
+            Number.isFinite(Number(channel.sortOrder)) ? Number(channel.sortOrder) : 0
+          ]
+        )
+        changed = true
+      }
+    }
+
+    const allowedChannelKeys = BUILTIN_CHANNELS.map(channel => channel.key)
+    if (allowedChannelKeys.length) {
       database.run(
-        `
-          INSERT INTO channels (
-            key, name, redeem_mode, provider_type, allow_common_fallback, allow_downstream_sale, is_active, is_builtin, sort_order, created_at, updated_at
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
-        `,
-        [
-          channel.key,
-          channel.name,
-          channel.redeemMode,
-          channel.providerType || 'local',
-          Number(channel.allowCommonFallback) ? 1 : 0,
-          Number(channel.allowDownstreamSale) ? 1 : 0,
-          Number(channel.isActive) ? 1 : 0,
-          Number(channel.isBuiltin) ? 1 : 0,
-          Number.isFinite(Number(channel.sortOrder)) ? Number(channel.sortOrder) : 0
-        ]
+        `DELETE FROM channels WHERE key NOT IN (${allowedChannelKeys.map(() => '?').join(',')})`,
+        allowedChannelKeys
       )
-      changed = true
+      if ((typeof database.getRowsModified === 'function' ? database.getRowsModified() : 0) > 0) {
+        changed = true
+      }
     }
 
     database.run(
