@@ -145,12 +145,6 @@ watch(isAuthenticated, (value) => {
         >
           登录
         </RouterLink>
-        <RouterLink
-          to="/register"
-          class="h-10 inline-flex items-center rounded-full bg-gray-900 text-white px-4 text-[13px] font-medium shadow-lg shadow-black/10 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-2xl hover:bg-black"
-        >
-          注册
-        </RouterLink>
       </template>
     </div>
 

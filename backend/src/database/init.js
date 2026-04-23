@@ -9,11 +9,6 @@ import { generateDownstreamPublicCode } from '../utils/downstream-order-items.js
 
 const CHANNEL_LABELS = {
   common: '通用渠道',
-  paypal: 'PayPal 渠道',
-  'linux-do': 'Linux DO 渠道',
-  xhs: '小红书渠道',
-  xianyu: '闲鱼渠道',
-  'artisan-flow': 'ArtisanFlow 渠道',
   'external-card': '卡密兑换',
 }
 const DEFAULT_CHANNEL = 'common'
@@ -31,61 +26,6 @@ const BUILTIN_CHANNELS = [
     sortOrder: 10
   },
   {
-    key: 'paypal',
-    name: CHANNEL_LABELS.paypal,
-    redeemMode: 'code',
-    providerType: 'local',
-    allowCommonFallback: 0,
-    allowDownstreamSale: 0,
-    isActive: 1,
-    isBuiltin: 0,
-    sortOrder: 20
-  },
-  {
-    key: 'linux-do',
-    name: CHANNEL_LABELS['linux-do'],
-    redeemMode: 'linux-do',
-    providerType: 'local',
-    allowCommonFallback: 0,
-    allowDownstreamSale: 0,
-    isActive: 1,
-    isBuiltin: 1,
-    sortOrder: 30
-  },
-  {
-    key: 'xhs',
-    name: CHANNEL_LABELS.xhs,
-    redeemMode: 'xhs',
-    providerType: 'local',
-    allowCommonFallback: 1,
-    allowDownstreamSale: 0,
-    isActive: 1,
-    isBuiltin: 1,
-    sortOrder: 40
-  },
-  {
-    key: 'xianyu',
-    name: CHANNEL_LABELS.xianyu,
-    redeemMode: 'xianyu',
-    providerType: 'local',
-    allowCommonFallback: 1,
-    allowDownstreamSale: 0,
-    isActive: 1,
-    isBuiltin: 1,
-    sortOrder: 50
-  },
-  {
-    key: 'artisan-flow',
-    name: CHANNEL_LABELS['artisan-flow'],
-    redeemMode: 'code',
-    providerType: 'local',
-    allowCommonFallback: 0,
-    allowDownstreamSale: 0,
-    isActive: 1,
-    isBuiltin: 0,
-    sortOrder: 60
-  },
-  {
     key: 'external-card',
     name: CHANNEL_LABELS['external-card'],
     redeemMode: 'external-card',
@@ -94,7 +34,7 @@ const BUILTIN_CHANNELS = [
     allowDownstreamSale: 0,
     isActive: 1,
     isBuiltin: 1,
-    sortOrder: 70
+    sortOrder: 20
   }
 ]
 

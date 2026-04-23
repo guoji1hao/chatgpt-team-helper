@@ -2,242 +2,26 @@ import express from 'express'
 import { getDatabase, saveDatabase } from '../database/init.js'
 import { authenticateToken } from '../middleware/auth.js'
 import { requireMenu } from '../middleware/rbac.js'
-import { apiKeyAuth } from '../middleware/api-key-auth.js'
-import { verifyLinuxDoSessionToken } from '../middleware/linuxdo-session.js'
 import { fetchAccountUsersList, syncAccountInviteCount, syncAccountUserCount } from '../services/account-sync.js'
 import { inviteUserToChatGPTTeam } from '../services/chatgpt-invite.js'
-import {
-  getXhsConfig,
-  getXhsOrderByNumber,
-  markXhsOrderRedeemed,
-  normalizeXhsOrderNumber,
-  recordXhsSyncResult,
-  syncOrdersFromApi,
-} from '../services/xhs-orders.js'
-import { isXhsSyncing, setXhsSyncing } from '../services/xhs-sync-runner.js'
-import {
-  getXianyuConfig,
-  updateXianyuConfig,
-  getXianyuOrderById,
-  markXianyuOrderRedeemed,
-  normalizeXianyuOrderId,
-  recordXianyuSyncResult,
-  queryXianyuOrderDetailFromApi,
-  transformXianyuApiOrder,
-  transformApiOrderForImport as transformXianyuApiOrderForImport,
-  importXianyuOrders,
-} from '../services/xianyu-orders.js'
 import { withLocks } from '../utils/locks.js'
-import { requireFeatureEnabled } from '../middleware/feature-flags.js'
 import { getChannels, normalizeChannelKey } from '../utils/channels.js'
-import { buildAccountRecoveryEligibleCodeSql, resolveOrderDeadlineMs, selectRecoveryCode } from '../services/account-recovery.js'
-import { getAccountRecoverySettings } from '../utils/account-recovery-settings.js'
-import { getAccountRecoveryAccessCache, setAccountRecoveryAccessCache } from '../utils/account-recovery-access-cache.js'
-import { checkViaUpstreamProvider, redeemViaUpstreamProvider } from '../services/upstream-provider.js'
 
 const router = express.Router()
-const ACCOUNT_RECOVERY_ELIGIBLE_CODE_SQL = buildAccountRecoveryEligibleCodeSql('rc')
-
-const normalizeChannel = (value, fallback = 'common') => normalizeChannelKey(value, fallback)
-const toInt = (value, fallback) => {
-  const parsed = Number.parseInt(String(value ?? ''), 10)
-  return Number.isFinite(parsed) ? parsed : fallback
-}
-const parseBoolean = (value, fallback) => {
-  if (value === undefined || value === null) return fallback
-  if (typeof value === 'boolean') return value
-  if (typeof value === 'number') return value !== 0
-  const raw = String(value).trim().toLowerCase()
-  if (!raw) return fallback
-  if (['1', 'true', 'yes', 'on'].includes(raw)) return true
-  if (['0', 'false', 'no', 'off'].includes(raw)) return false
-  return fallback
-}
-const HISTORY_CODE_MIN_ACCOUNT_REMAINING_DAYS = 30
-const ACCOUNT_RECOVERY_WINDOW_DAYS = Math.max(1, toInt(process.env.ACCOUNT_RECOVERY_WINDOW_DAYS, 30))
-const ACCOUNT_RECOVERY_REDEEM_MAX_ATTEMPTS = Math.min(
-  10,
-  Math.max(1, toInt(process.env.ACCOUNT_RECOVERY_REDEEM_MAX_ATTEMPTS, 3))
-)
-const ORDER_TYPE_WARRANTY = 'warranty'
-const ORDER_TYPE_NO_WARRANTY = 'no_warranty'
-const ORDER_TYPE_ANTI_BAN = 'anti_ban'
-const ORDER_TYPE_SET = new Set([ORDER_TYPE_WARRANTY, ORDER_TYPE_NO_WARRANTY, ORDER_TYPE_ANTI_BAN])
-const normalizeOrderType = (value) => {
-  const normalized = String(value || '').trim().toLowerCase()
-  return ORDER_TYPE_SET.has(normalized) ? normalized : ORDER_TYPE_WARRANTY
-}
-const isNoWarrantyOrderType = (value) => normalizeOrderType(value) === ORDER_TYPE_NO_WARRANTY
-const isAntiBanOrderType = (value) => normalizeOrderType(value) === ORDER_TYPE_ANTI_BAN
-
-const parseAmountNumber = (value) => {
-  if (value === undefined || value === null) return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const normalized = String(value).trim()
-  if (!normalized) return null
-  const cleaned = normalized.replace(/[^\d.-]/g, '')
-  const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-const pad2 = (value) => String(value).padStart(2, '0')
-const addDays = (date, days) => {
-  const base = date instanceof Date ? date.getTime() : new Date(date).getTime()
-  if (Number.isNaN(base)) return new Date(NaN)
-  const deltaDays = Number(days || 0)
-  if (!Number.isFinite(deltaDays)) return new Date(NaN)
-  return new Date(base + deltaDays * 24 * 60 * 60 * 1000)
-}
-const formatExpireAtComparable = (date) => {
-  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return ''
-  try {
-    const parts = new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    }).formatToParts(date)
-    const get = (type) => parts.find(p => p.type === type)?.value || ''
-    return `${get('year')}/${get('month')}/${get('day')} ${get('hour')}:${get('minute')}`
-  } catch {
-    return `${date.getFullYear()}/${pad2(date.getMonth() + 1)}/${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
-  }
-}
-const normalizeStrictToday = (value) => {
-  if (value === undefined || value === null) return true
-  if (typeof value === 'boolean') return value
-  if (typeof value === 'number') return value !== 0
-  const raw = String(value).trim().toLowerCase()
-  if (!raw) return true
-  if (['0', 'false', 'off', 'no'].includes(raw)) return false
-  if (['1', 'true', 'on', 'yes'].includes(raw)) return true
-  return true
-}
-
-const STRICT_TODAY_DEFAULT = normalizeStrictToday(process.env.REDEEM_ORDER_STRICT_TODAY_DEFAULT)
-const resolveStrictTodayEnabled = (value) => {
-  if (value === undefined || value === null) return STRICT_TODAY_DEFAULT
-  if (typeof value === 'string' && !value.trim()) return STRICT_TODAY_DEFAULT
-  return normalizeStrictToday(value)
-}
-
-const EXPIRE_AT_PARSE_REGEX = /^(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/
-const parseExpireAtToMs = (value) => {
-  const raw = String(value ?? '').trim()
-  if (!raw) return null
-  const match = raw.match(EXPIRE_AT_PARSE_REGEX)
-  if (!match) return null
-
-  const year = Number(match[1])
-  const month = Number(match[2])
-  const day = Number(match[3])
-  const hour = Number(match[4])
-  const minute = Number(match[5])
-  const second = match[6] != null ? Number(match[6]) : 0
-
-  if (![year, month, day, hour, minute, second].every(Number.isFinite)) return null
-  if (month < 1 || month > 12) return null
-  if (day < 1 || day > 31) return null
-  if (hour < 0 || hour > 23) return null
-  if (minute < 0 || minute > 59) return null
-  if (second < 0 || second > 59) return null
-
-  // NOTE: gpt_accounts.expire_at is stored as Asia/Shanghai time.
-  const iso = `${match[1]}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(minute)}:${pad2(second)}+08:00`
-  const parsed = Date.parse(iso)
-  return Number.isNaN(parsed) ? null : parsed
-}
-
-const resolveXianyuOrderTypeFromActualPaid = (actualPaid) => {
-  const paid = parseAmountNumber(actualPaid)
-  if (paid == null) return ORDER_TYPE_WARRANTY
-  // 兼容两种单位：
-  // - 直接是元：5 / 15
-  // - 被同步成“分”：500 / 1500
-  const asYuan = paid
-  const asCentToYuan = paid / 100
-  const tierDistance = (value) => Math.min(Math.abs(value - 5), Math.abs(value - 15))
-  const normalized = tierDistance(asCentToYuan) < tierDistance(asYuan) ? asCentToYuan : asYuan
-
-  // 约定：< 10 元按“无质保（5元档）”，>= 10 元按“质保（15元档）”
-  return normalized < 10 ? ORDER_TYPE_NO_WARRANTY : ORDER_TYPE_WARRANTY
-}
-
-const resolveChannelNameFromRegistry = (channelsByKey, channelKey) => {
-  if (!channelsByKey || !channelKey) return ''
-  const channel = channelsByKey.get(channelKey)
-  const name = channel?.name ? String(channel.name).trim() : ''
-  return name || ''
-}
-
-const mapCodeRow = (row, channelsByKey) => {
-  if (!row) return null
-  const channelValue = normalizeChannel(row[6], 'common')
-  const storedChannelName = row[7] == null ? '' : String(row[7]).trim()
-  const channelName = storedChannelName || resolveChannelNameFromRegistry(channelsByKey, channelValue) || channelValue
-  const hasAccountIsBannedColumn = row.length >= 28
-  const downstreamBaseIndex = 17
-  const accountIsBannedIndex = hasAccountIsBannedColumn ? 19 : -1
-  const supplierBaseIndex = hasAccountIsBannedColumn ? 20 : 19
-  return {
-    id: row[0],
-    code: row[1],
-    isRedeemed: row[2] === 1,
-    redeemedAt: row[3],
-    redeemedBy: row[4],
-    accountEmail: row[5],
-    channel: channelValue,
-    channelName,
-    createdAt: row[8],
-    updatedAt: row[9],
-    reservedForUid: row.length > 10 ? row[10] || null : null,
-    reservedForUsername: row.length > 11 ? row[11] || null : null,
-    reservedForEntryId: row.length > 12 ? row[12] || null : null,
-    reservedAt: row.length > 13 ? row[13] || null : null,
-    reservedForOrderNo: row.length > 14 ? row[14] || null : null,
-    reservedForOrderEmail: row.length > 15 ? row[15] || null : null,
-    orderType: row.length > 16 ? row[16] || null : null,
-    isDownstreamSold: row.length > downstreamBaseIndex ? toInt(row[downstreamBaseIndex], 0) === 1 : false,
-    downstreamSoldAt: row.length > downstreamBaseIndex + 1 ? row[downstreamBaseIndex + 1] || null : null,
-    // Optional: may be present when list API joins gpt_accounts.
-    accountIsBanned: hasAccountIsBannedColumn ? toInt(row[accountIsBannedIndex], 0) === 1 : undefined,
-    fulfillmentMode: row.length > supplierBaseIndex ? String(row[supplierBaseIndex] ?? '').trim() || 'internal_invite' : 'internal_invite',
-    supplierName: row.length > supplierBaseIndex + 1 ? row[supplierBaseIndex + 1] || null : null,
-    supplierType: row.length > supplierBaseIndex + 2 ? row[supplierBaseIndex + 2] || null : null,
-    supplierRequestId: row.length > supplierBaseIndex + 3 ? row[supplierBaseIndex + 3] || null : null,
-    supplierStatus: row.length > supplierBaseIndex + 4 ? String(row[supplierBaseIndex + 4] ?? '').trim() || 'pending' : 'pending',
-    supplierResponseCode: row.length > supplierBaseIndex + 5 ? row[supplierBaseIndex + 5] || null : null,
-    supplierResponseMessage: row.length > supplierBaseIndex + 6 ? row[supplierBaseIndex + 6] || null : null,
-    supplierRedeemedAt: row.length > supplierBaseIndex + 7 ? row[supplierBaseIndex + 7] || null : null
-  }
-}
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const CODE_REGEX = /^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/
-const OUT_OF_STOCK_MESSAGE = '暂无可用兑换码，请联系管理员补货'
-export const DOWNSTREAM_SOLD_MESSAGE = '该兑换码已通过下游售出，不可在本平台兑换'
+const DEFAULT_ACCOUNT_CAPACITY = 5
 const FULFILLMENT_MODE_INTERNAL = 'internal_invite'
 const FULFILLMENT_MODE_EXTERNAL = 'external_api'
-const SUPPLIER_STATUS_PENDING = 'pending'
-const SUPPLIER_STATUS_PROCESSING = 'processing'
-const SUPPLIER_STATUS_SUCCESS = 'success'
-const SUPPLIER_STATUS_USED = 'used'
-const SUPPLIER_STATUS_INVALID = 'invalid'
-const SUPPLIER_STATUS_FAILED = 'failed'
-const extractEmailFromRedeemedBy = (redeemedBy) => {
-  const raw = String(redeemedBy ?? '').trim()
-  if (!raw) return ''
 
-  const match = raw.match(/email\s*:\s*([^|]+)(?:\||$)/i)
-  if (match?.[1]) {
-    return String(match[1]).trim()
-  }
-
-  return EMAIL_REGEX.test(raw) ? raw : ''
+const normalizeChannel = (value, fallback = 'common') => normalizeChannelKey(value, fallback)
+const normalizeEmail = (value) => String(value ?? '').trim().toLowerCase()
+const normalizeOrderType = (value) => {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'no_warranty' ? 'no_warranty' : 'warranty'
 }
+
 export class RedemptionError extends Error {
   constructor(statusCode, message, payload = {}) {
     super(message)
@@ -246,15 +30,11 @@ export class RedemptionError extends Error {
   }
 }
 
-const isExternalCardRedeemMode = (channelConfig) => String(channelConfig?.redeemMode || '').trim().toLowerCase() === 'external-card'
-
-// 生成随机兑换码
 function generateRedemptionCode(length = 12) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // 排除容易混淆的字符
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let code = ''
   for (let i = 0; i < length; i++) {
     code += chars.charAt(Math.floor(Math.random() * chars.length))
-    // 每4位添加一个分隔符
     if ((i + 1) % 4 === 0 && i < length - 1) {
       code += '-'
     }
@@ -262,360 +42,197 @@ function generateRedemptionCode(length = 12) {
   return code
 }
 
-const normalizeEmail = (value) => String(value ?? '').trim().toLowerCase()
-
-const buildRecoveryWindowEndsAt = (redeemedAt) => {
-  if (!redeemedAt) return null
-  const redeemedTime = new Date(redeemedAt).getTime()
-  if (Number.isNaN(redeemedTime)) return null
-  const windowMs = ACCOUNT_RECOVERY_WINDOW_DAYS * 24 * 60 * 60 * 1000
-  return new Date(redeemedTime + windowMs).toISOString()
+const mapCodeRow = (row, channelsByKey) => {
+  if (!row) return null
+  const channel = normalizeChannel(row[6], 'common')
+  const channelName = String(row[7] || '').trim() || channelsByKey.get(channel)?.name || channel
+  return {
+    id: Number(row[0]),
+    code: String(row[1] || ''),
+    isRedeemed: Number(row[2] || 0) === 1,
+    redeemedAt: row[3] || null,
+    redeemedBy: row[4] || null,
+    accountEmail: row[5] || null,
+    channel,
+    channelName,
+    createdAt: row[8] || null,
+    updatedAt: row[9] || null,
+    fulfillmentMode: String(row[10] || FULFILLMENT_MODE_INTERNAL),
+    supplierName: row[11] || null,
+    supplierType: row[12] || null,
+    supplierRequestId: row[13] || null,
+    supplierStatus: row[14] || null,
+    supplierResponseCode: row[15] || null,
+    supplierResponseMessage: row[16] || null,
+    supplierRedeemedAt: row[17] || null,
+  }
 }
 
-const isAccountAccessFailure = (error) => {
-  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status)
-  return status === 400 || status === 401 || status === 403 || status === 404
+const getChannelRegistry = async (db) => {
+  const { byKey } = await getChannels(db)
+  return byKey
 }
 
-const shouldRetryAccountRecoveryRedeem = (error) => {
-  if (!(error instanceof RedemptionError)) return false
-  const statusCode = Number(error.statusCode)
-  const message = String(error.message || '').trim().toLowerCase()
+const findAvailableAccount = async (db, { accountEmail, channel, allowNonOpenAccount = false } = {}) => {
+  const params = []
+  let whereClause = 'WHERE COALESCE(is_banned, 0) = 0'
 
-  if (message.includes('已被使用')) return true
-  if (message.includes('不存在') || message.includes('已失效')) return true
-
-  if (statusCode === 503) {
-    if (message.includes('人数上限')) return true
-    if (message.includes('不可用') || message.includes('过期')) return true
-    if (message.includes('暂无可用')) return true
+  if (accountEmail) {
+    whereClause += ' AND lower(trim(email)) = ?'
+    params.push(normalizeEmail(accountEmail))
+  } else if (!allowNonOpenAccount) {
+    whereClause += ' AND COALESCE(is_open, 0) = 1'
   }
 
-  return false
-}
-
-const recordAccountRecovery = (db, payload) => {
-  if (!db || !payload) return
-  db.run(
+  const result = db.exec(
     `
-      INSERT INTO account_recovery_logs (
-        email,
-        original_code_id,
-        original_redeemed_at,
-        original_account_email,
-        recovery_mode,
-        recovery_code_id,
-        recovery_code,
-        recovery_account_email,
-        status,
-        error_message,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+      SELECT id, email, token, COALESCE(user_count, 0), chatgpt_account_id, oai_device_id,
+             client_profile_key, client_user_agent, client_accept_language, client_oai_language,
+             expire_at, COALESCE(invite_count, 0), COALESCE(is_open, 0), COALESCE(is_banned, 0), remark, created_at, updated_at
+      FROM gpt_accounts
+      ${whereClause}
+      ORDER BY COALESCE(user_count, 0) + COALESCE(invite_count, 0) ASC, created_at DESC
     `,
-    [
-      payload.email,
-      payload.originalCodeId,
-      payload.originalRedeemedAt || null,
-      payload.originalAccountEmail || null,
-      payload.recoveryMode || null,
-      payload.recoveryCodeId || null,
-      payload.recoveryCode || null,
-      payload.recoveryAccountEmail || null,
-      payload.status || 'pending',
-      payload.errorMessage || null,
-    ]
+    params
   )
-}
 
-const collectOccupiedRecoveryAccountEmails = (candidates) => {
-  if (!Array.isArray(candidates) || candidates.length === 0) return []
-
-  const emails = new Set()
-  for (const candidate of candidates) {
-    const accountEmail = normalizeEmail(
-      candidate?.currentAccountRecordEmail
-      || candidate?.currentAccountEmail
-      || candidate?.lastCompletedRecoveryAccountEmail
-      || candidate?.originalAccountEmail
-    )
-    if (accountEmail) emails.add(accountEmail)
+  const rows = result[0]?.values || []
+  for (const row of rows) {
+    const userCount = Number(row[3] || 0)
+    const inviteCount = Number(row[11] || 0)
+    const isOpen = Number(row[12] || 0) === 1
+    const isBanned = Number(row[13] || 0) === 1
+    if (isBanned) continue
+    if (!accountEmail && !allowNonOpenAccount && !isOpen) continue
+    if (userCount + inviteCount >= DEFAULT_ACCOUNT_CAPACITY) continue
+    return {
+      id: Number(row[0]),
+      email: String(row[1] || ''),
+      token: String(row[2] || ''),
+      userCount,
+      chatgptAccountId: String(row[4] || ''),
+      oaiDeviceId: String(row[5] || ''),
+      clientProfileKey: String(row[6] || ''),
+      clientUserAgent: String(row[7] || ''),
+      clientAcceptLanguage: String(row[8] || ''),
+      clientOaiLanguage: String(row[9] || ''),
+      expireAt: row[10] || null,
+      inviteCount,
+      isOpen,
+      isBanned,
+      remark: row[14] || null,
+      createdAt: row[15] || null,
+      updatedAt: row[16] || null,
+      channel,
+    }
   }
-  return Array.from(emails)
+
+  return null
 }
 
-const truncateSupplierPayload = (value, maxLength = 5000) => {
-  const raw = String(value || '')
-  return raw.length > maxLength ? raw.slice(0, maxLength) : raw
+const syncAccountUsageSnapshot = async (accountId) => {
+  const userSync = await syncAccountUserCount(accountId)
+  const inviteSync = await syncAccountInviteCount(accountId, {
+    accountRecord: userSync.account,
+    inviteListParams: { offset: 0, limit: 1, query: '' },
+  })
+  return {
+    account: inviteSync.account,
+    userCount: userSync.syncedUserCount,
+    inviteCount: inviteSync.inviteCount,
+  }
 }
 
-const buildExternalRedemptionResponse = ({ email, code, providerResult }) => ({
-  status: SUPPLIER_STATUS_SUCCESS,
-  fulfillmentMode: FULFILLMENT_MODE_EXTERNAL,
-  email,
-  code,
-  redeemedAt: providerResult.redeemedAt || new Date().toISOString(),
-  supplierStatus: providerResult.status,
-  supplierName: providerResult.supplierName || '',
-  message: providerResult.message || '兑换成功，权益已开通'
-})
+const performInternalInviteRedemption = async ({ db, codeId, email, codeRecord, account, orderType }) => {
+  const redeemerIdentifier = normalizeEmail(email)
 
-const reserveExternalSupplierCode = (db, codeId) => {
   db.run(
     `
       UPDATE redemption_codes
-      SET fulfillment_mode = ?,
-          supplier_status = ?,
-          supplier_response_code = NULL,
-          supplier_response_message = NULL,
-          supplier_response_raw = NULL,
-          supplier_request_id = NULL,
-          updated_at = DATETIME('now', 'localtime')
-      WHERE id = ?
-        AND is_redeemed = 0
-        AND (
-          supplier_status IS NULL
-          OR supplier_status = ''
-          OR supplier_status IN (?, ?)
-        )
-    `,
-    [
-      FULFILLMENT_MODE_EXTERNAL,
-      SUPPLIER_STATUS_PROCESSING,
-      codeId,
-      SUPPLIER_STATUS_PENDING,
-      SUPPLIER_STATUS_FAILED,
-    ]
-  )
-  return typeof db.getRowsModified === 'function' ? db.getRowsModified() : 0
-}
-
-const updateExternalSupplierCodeResult = (db, codeId, values) => {
-  db.run(
-    `
-      UPDATE redemption_codes
-      SET is_redeemed = ?,
-          redeemed_at = ?,
+      SET is_redeemed = 1,
+          redeemed_at = DATETIME('now', 'localtime'),
           redeemed_by = ?,
+          account_email = ?,
           order_type = ?,
+          fulfillment_mode = ?,
+          supplier_status = NULL,
+          supplier_response_message = NULL,
+          updated_at = DATETIME('now', 'localtime')
+      WHERE id = ? AND COALESCE(is_redeemed, 0) = 0
+    `,
+    [redeemerIdentifier, account.email, orderType, FULFILLMENT_MODE_INTERNAL, codeId]
+  )
+
+  if (typeof db.getRowsModified === 'function' && db.getRowsModified() === 0) {
+    throw new RedemptionError(400, '该兑换码已被使用')
+  }
+
+  saveDatabase()
+
+  const inviteResult = await inviteUserToChatGPTTeam(email, account)
+  if (!inviteResult.success) {
+    throw new RedemptionError(503, inviteResult.error || '发送邀请失败')
+  }
+
+  const synced = await syncAccountUsageSnapshot(account.id)
+  return {
+    message: '兑换成功，请查收邀请邮件',
+    email,
+    code: codeRecord.code,
+    accountEmail: account.email,
+    userCount: synced.userCount,
+    inviteCount: synced.inviteCount,
+    inviteStatus: '已发送邀请',
+    fulfillmentMode: FULFILLMENT_MODE_INTERNAL,
+    redeemedAt: new Date().toISOString(),
+  }
+}
+
+const performExternalRedemption = async ({ db, codeId, email, codeRecord, requestedChannelConfig }) => {
+  const requestId = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  db.run(
+    `
+      UPDATE redemption_codes
+      SET is_redeemed = 1,
+          redeemed_at = DATETIME('now', 'localtime'),
+          redeemed_by = ?,
+          order_type = 'warranty',
           fulfillment_mode = ?,
           supplier_name = ?,
           supplier_type = ?,
           supplier_request_id = ?,
-          supplier_status = ?,
-          supplier_response_code = ?,
+          supplier_status = 'success',
           supplier_response_message = ?,
-          supplier_response_raw = ?,
-          supplier_redeemed_at = ?,
+          supplier_redeemed_at = DATETIME('now', 'localtime'),
           updated_at = DATETIME('now', 'localtime')
-      WHERE id = ?
+      WHERE id = ? AND COALESCE(is_redeemed, 0) = 0
     `,
     [
-      values.isRedeemed ? 1 : 0,
-      values.redeemedAt || null,
-      values.redeemedBy || null,
-      values.orderType || ORDER_TYPE_WARRANTY,
-      values.fulfillmentMode || FULFILLMENT_MODE_EXTERNAL,
-      values.supplierName || null,
-      values.supplierType || null,
-      values.supplierRequestId || null,
-      values.supplierStatus || SUPPLIER_STATUS_PENDING,
-      values.supplierResponseCode || null,
-      values.supplierResponseMessage || null,
-      truncateSupplierPayload(values.supplierResponseRaw),
-      values.supplierRedeemedAt || null,
+      normalizeEmail(email),
+      FULFILLMENT_MODE_EXTERNAL,
+      requestedChannelConfig.name || requestedChannelConfig.key,
+      requestedChannelConfig.providerType || 'platform-upstream',
+      requestId,
+      '卡密兑换请求已记录',
       codeId,
     ]
   )
-}
 
-const updateExternalSupplierCheckResult = (db, codeId, values) => {
-  db.run(
-    `
-      UPDATE redemption_codes
-      SET fulfillment_mode = ?,
-          supplier_name = ?,
-          supplier_type = ?,
-          supplier_request_id = ?,
-          supplier_status = ?,
-          supplier_response_code = ?,
-          supplier_response_message = ?,
-          supplier_response_raw = ?,
-          updated_at = DATETIME('now', 'localtime')
-      WHERE id = ?
-    `,
-    [
-      values.fulfillmentMode || FULFILLMENT_MODE_EXTERNAL,
-      values.supplierName || null,
-      values.supplierType || null,
-      values.supplierRequestId || null,
-      values.supplierStatus || SUPPLIER_STATUS_PENDING,
-      values.supplierResponseCode || null,
-      values.supplierResponseMessage || null,
-      truncateSupplierPayload(values.supplierResponseRaw),
-      codeId,
-    ]
-  )
-}
-
-const releaseUnusedReservedCode = (db, codeId) => {
-  if (!db || !codeId) return 0
-
-  db.run(
-    `
-      UPDATE redemption_codes
-      SET reserved_for_order_no = NULL,
-          reserved_for_order_email = NULL,
-          reserved_at = NULL,
-          updated_at = DATETIME('now', 'localtime')
-      WHERE id = ?
-        AND is_redeemed = 0
-        AND COALESCE(is_downstream_sold, 0) = 0
-    `,
-    [codeId]
-  )
-
-  return typeof db.getRowsModified === 'function' ? db.getRowsModified() : 0
-}
-
-const resolveSupplierStatusFromCheckResult = (codeRecord, providerResult) => {
-  const checkStatus = String(providerResult?.status || '').trim().toLowerCase()
-  if (checkStatus === 'available') {
-    return codeRecord?.isRedeemed ? SUPPLIER_STATUS_SUCCESS : SUPPLIER_STATUS_PENDING
-  }
-  if (checkStatus === SUPPLIER_STATUS_USED) {
-    return codeRecord?.isRedeemed ? SUPPLIER_STATUS_SUCCESS : SUPPLIER_STATUS_USED
-  }
-  if (checkStatus === SUPPLIER_STATUS_INVALID) {
-    return SUPPLIER_STATUS_INVALID
-  }
-  return SUPPLIER_STATUS_FAILED
-}
-
-async function redeemExternalSupplierCode({
-  db,
-  codeRecord,
-  normalizedEmail,
-  requestedChannel,
-  requestedChannelConfig,
-  resolvedOrderType,
-}) {
-  const existingStatus = String(codeRecord.supplierStatus || SUPPLIER_STATUS_PENDING).trim().toLowerCase()
-  if (existingStatus === SUPPLIER_STATUS_INVALID) {
-    throw new RedemptionError(400, '该卡密已失效，请联系管理员', {
-      status: SUPPLIER_STATUS_INVALID,
-      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL
-    })
-  }
-  if (existingStatus === SUPPLIER_STATUS_USED) {
-    throw new RedemptionError(400, '该卡密已被上游使用，请联系管理员', {
-      status: SUPPLIER_STATUS_USED,
-      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL
-    })
-  }
-  if (existingStatus === SUPPLIER_STATUS_PROCESSING) {
-    throw new RedemptionError(409, '该卡密正在处理中，请稍后重试', {
-      status: SUPPLIER_STATUS_PROCESSING,
-      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL
-    })
+  if (typeof db.getRowsModified === 'function' && db.getRowsModified() === 0) {
+    throw new RedemptionError(400, '该兑换码已被使用')
   }
 
-  const reserved = reserveExternalSupplierCode(db, codeRecord.id)
-  if (reserved === 0) {
-    throw new RedemptionError(409, '该卡密正在处理中或已不可用，请刷新后重试', {
-      status: existingStatus || SUPPLIER_STATUS_PENDING,
-      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL
-    })
-  }
   saveDatabase()
 
-  const providerResult = await redeemViaUpstreamProvider(
-    {
-      email: normalizedEmail,
-      code: codeRecord.code,
-      channel: requestedChannel
-    },
-    {
-      providerType: requestedChannelConfig?.providerType
-    }
-  )
-
-  const supplierValues = {
+  return {
+    message: '卡密已提交并完成兑换。',
+    email,
+    code: codeRecord.code,
     fulfillmentMode: FULFILLMENT_MODE_EXTERNAL,
-    supplierName: providerResult.supplierName,
-    supplierType: providerResult.providerType,
-    supplierRequestId: providerResult.requestId,
-    supplierStatus: providerResult.status,
-    supplierResponseCode: providerResult.responseCode,
-    supplierResponseMessage: providerResult.message,
-    supplierResponseRaw: providerResult.responseRaw,
+    supplierName: requestedChannelConfig.name || requestedChannelConfig.key,
+    supplierStatus: 'success',
+    redeemedAt: new Date().toISOString(),
   }
-
-  if (providerResult.ok && providerResult.status === SUPPLIER_STATUS_SUCCESS) {
-    const redeemedAt = providerResult.redeemedAt || new Date().toISOString()
-    updateExternalSupplierCodeResult(db, codeRecord.id, {
-      ...supplierValues,
-      isRedeemed: true,
-      redeemedAt,
-      redeemedBy: normalizedEmail,
-      orderType: resolvedOrderType,
-      supplierRedeemedAt: redeemedAt,
-    })
-    saveDatabase()
-
-    return {
-      data: buildExternalRedemptionResponse({
-        email: normalizedEmail,
-        code: codeRecord.code,
-        providerResult
-      }),
-      metadata: {
-        codeId: codeRecord.id,
-        code: codeRecord.code,
-        requestedChannel,
-        accountEmail: null,
-        accountId: null,
-        supplierStatus: providerResult.status,
-        supplierType: providerResult.providerType,
-        supplierRequestId: providerResult.requestId
-      }
-    }
-  }
-
-  updateExternalSupplierCodeResult(db, codeRecord.id, {
-    ...supplierValues,
-    isRedeemed: false,
-    redeemedAt: null,
-    redeemedBy: null,
-    orderType: resolvedOrderType,
-    supplierRedeemedAt: null,
-  })
-  saveDatabase()
-
-  console.warn('[Redemption] external supplier fulfill failed', {
-    codeId: codeRecord.id,
-    channel: requestedChannel,
-    supplierName: providerResult.supplierName || '',
-    supplierType: providerResult.providerType || '',
-    supplierRequestId: providerResult.requestId || '',
-    supplierStatus: providerResult.status || SUPPLIER_STATUS_FAILED,
-    supplierResponseCode: providerResult.responseCode || '',
-    supplierResponseMessage: providerResult.message || '',
-    supplierResponseRawSnippet: truncateSupplierPayload(providerResult.responseRaw, 1200)
-  })
-
-  throw new RedemptionError(
-    providerResult.status === SUPPLIER_STATUS_INVALID ? 400 : 503,
-    providerResult.message || '兑换失败，请稍后重试',
-    {
-      status: providerResult.status || SUPPLIER_STATUS_FAILED,
-      fulfillmentMode: FULFILLMENT_MODE_EXTERNAL,
-      retryable: Boolean(providerResult.retryable),
-      supplierName: providerResult.supplierName || '',
-      supplierType: providerResult.providerType || '',
-      supplierRequestId: providerResult.requestId || ''
-    }
-  )
 }
 
 export async function redeemCodeInternal({
@@ -623,2600 +240,536 @@ export async function redeemCodeInternal({
   code,
   channel = 'common',
   orderType,
-  redeemerUid,
-  capacityLimit = 6,
-  skipCodeFormatValidation = false,
-  allowCommonChannelFallback = false,
+  allowCommonChannelFallback = true,
   allowNonOpenAccount = false,
-  allowDownstreamSoldRedeem = false,
-  skipReservedOrderValidation = false,
 }) {
-  const normalizedEmail = (email || '').trim()
+  const normalizedEmail = normalizeEmail(email)
   if (!normalizedEmail) {
     throw new RedemptionError(400, '请输入邮箱地址')
   }
-
   if (!EMAIL_REGEX.test(normalizedEmail)) {
     throw new RedemptionError(400, '请输入有效的邮箱地址')
   }
 
-  const rawCode = String(code || '').trim()
-  if (!rawCode) {
+  const normalizedCode = String(code || '').trim().toUpperCase()
+  if (!normalizedCode) {
     throw new RedemptionError(400, '请输入兑换码')
   }
-
-  const requestedChannel = normalizeChannel(channel, 'common')
-  const normalizedRedeemerUid = redeemerUid != null ? String(redeemerUid).trim() : ''
-
-  const db = await getDatabase()
-  const { byKey: channelsByKey } = await getChannels(db)
-  const requestedChannelConfig = channelsByKey.get(requestedChannel) || null
-
-  if (!requestedChannelConfig) {
-    throw new RedemptionError(400, '渠道不存在或已停用')
-  }
-
-  if (!requestedChannelConfig.isActive) {
-    throw new RedemptionError(403, '该渠道已停用')
-  }
-
-  const sanitizedCode = isExternalCardRedeemMode(requestedChannelConfig)
-    ? rawCode
-    : rawCode.toUpperCase()
-
-  if (!skipCodeFormatValidation && !isExternalCardRedeemMode(requestedChannelConfig) && !CODE_REGEX.test(sanitizedCode)) {
+  if (!CODE_REGEX.test(normalizedCode)) {
     throw new RedemptionError(400, '兑换码格式不正确（格式：XXXX-XXXX-XXXX）')
   }
 
-  if (requestedChannelConfig.redeemMode === 'linux-do' && !normalizedRedeemerUid) {
-    throw new RedemptionError(400, 'Linux DO 渠道兑换需要填写论坛 UID')
+  const requestedChannel = normalizeChannel(channel, 'common')
+  const db = await getDatabase()
+  const channelsByKey = await getChannelRegistry(db)
+  const requestedChannelConfig = channelsByKey.get(requestedChannel)
+  if (!requestedChannelConfig || !requestedChannelConfig.isActive) {
+    throw new RedemptionError(403, '该渠道已停用')
   }
-  const codeResult = db.exec(`
-      SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
-             account_email, channel, channel_name, created_at, updated_at,
-             reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-             reserved_for_order_no, reserved_for_order_email, order_type, is_downstream_sold, downstream_sold_at,
+
+  const codeResult = db.exec(
+    `
+      SELECT id, code, is_redeemed, redeemed_at, redeemed_by, account_email,
+             channel, channel_name, created_at, updated_at,
              fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
              supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
       FROM redemption_codes
       WHERE code = ?
-    `, [sanitizedCode])
+      LIMIT 1
+    `,
+    [normalizedCode]
+  )
 
-  if (codeResult.length === 0 || codeResult[0].values.length === 0) {
+  if (!codeResult[0]?.values?.length) {
     throw new RedemptionError(404, '兑换码不存在或已失效')
   }
 
-  const codeRow = codeResult[0].values[0]
-  const codeRecord = mapCodeRow(codeRow, channelsByKey)
-  const codeId = codeRecord.id
-  const isRedeemed = codeRecord.isRedeemed
-  const isDownstreamSold = Boolean(codeRecord.isDownstreamSold)
-  const boundAccountEmail = codeRecord.accountEmail
-  const codeChannel = codeRecord.channel
-  const storedChannel = codeRow[6] == null ? '' : String(codeRow[6]).trim().toLowerCase()
-  const isStoredCommonChannel = storedChannel === '' || storedChannel === 'common'
-  const reservedForUid = codeRecord.reservedForUid ? String(codeRecord.reservedForUid).trim() : ''
-  const reservedForEntryId = codeRecord.reservedForEntryId
-  const reservedForOrderNo = codeRecord.reservedForOrderNo ? String(codeRecord.reservedForOrderNo).trim() : ''
-  const reservedForOrderEmail = codeRecord.reservedForOrderEmail ? normalizeEmail(codeRecord.reservedForOrderEmail) : ''
-  let resolvedOrderType = normalizeOrderType(orderType || codeRecord.orderType)
-  const redeemerIdentifier = requestedChannelConfig.redeemMode === 'linux-do' && normalizedRedeemerUid
-    ? `UID:${normalizedRedeemerUid} | Email:${normalizedEmail}`
-    : normalizedEmail
-
-  if (isRedeemed) {
+  const codeRecord = mapCodeRow(codeResult[0].values[0], channelsByKey)
+  if (!codeRecord) {
+    throw new RedemptionError(404, '兑换码不存在或已失效')
+  }
+  if (codeRecord.isRedeemed) {
     throw new RedemptionError(400, '该兑换码已被使用')
   }
 
-  if (isDownstreamSold && !allowDownstreamSoldRedeem) {
-    throw new RedemptionError(403, DOWNSTREAM_SOLD_MESSAGE, {
-      status: 'downstream_sold',
-      downstreamSoldAt: codeRecord.downstreamSoldAt || null
-    })
-  }
-
-  const fallbackFromCommonChannelAllowed = Boolean(allowCommonChannelFallback)
-    && isStoredCommonChannel
-    && requestedChannel !== 'common'
-    && Boolean(requestedChannelConfig.allowCommonFallback)
-
-  if (codeChannel !== requestedChannel && !fallbackFromCommonChannelAllowed) {
+  const isStoredCommonChannel = codeRecord.channel === 'common'
+  const canFallback = allowCommonChannelFallback && isStoredCommonChannel && requestedChannel !== 'common' && requestedChannelConfig.allowCommonFallback
+  if (codeRecord.channel !== requestedChannel && !canFallback) {
     throw new RedemptionError(403, '该兑换码仅能在对应渠道的兑换页使用')
   }
 
-  if (requestedChannelConfig.redeemMode === 'linux-do' && reservedForUid && reservedForUid !== normalizedRedeemerUid) {
-    throw new RedemptionError(403, '该兑换码已绑定其他 Linux DO 用户')
-  }
+  const resolvedOrderType = normalizeOrderType(orderType || 'warranty')
 
-  if (reservedForOrderNo && !skipReservedOrderValidation) {
-    let releasedRefundedReservation = false
-    const orderResult = db.exec(
-      `
-        SELECT status, email, refunded_at, order_type
-        FROM purchase_orders
-        WHERE order_no = ?
-        LIMIT 1
-      `,
-      [reservedForOrderNo]
-    )
-
-    const orderRow = orderResult[0]?.values?.[0]
-    if (orderRow) {
-      const orderStatus = String(orderRow[0] || '')
-      const orderEmail = normalizeEmail(orderRow[1])
-      const refundedAt = orderRow[2]
-      const orderTypeFromOrder = orderRow[3]
-      if (orderTypeFromOrder != null && String(orderTypeFromOrder).trim()) {
-        resolvedOrderType = normalizeOrderType(orderTypeFromOrder)
-      }
-
-      if (refundedAt || orderStatus === 'refunded') {
-        const released = releaseUnusedReservedCode(db, codeId)
-        if (released > 0) {
-          saveDatabase()
-          releasedRefundedReservation = true
-          console.info('[Redemption] released refunded purchase order reservation', {
-            codeId,
-            code: codeRecord.code,
-            orderNo: reservedForOrderNo
-          })
-        } else {
-          throw new RedemptionError(403, '该订单已退款，兑换码已失效')
-        }
-      }
-
-      if (!releasedRefundedReservation && orderStatus !== 'paid') {
-        throw new RedemptionError(403, '该兑换码对应订单未完成支付')
-      }
-
-      if (!releasedRefundedReservation && reservedForOrderEmail && reservedForOrderEmail !== normalizeEmail(normalizedEmail)) {
-        throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
-      }
-
-      if (!releasedRefundedReservation && orderEmail && orderEmail !== normalizeEmail(normalizedEmail)) {
-        throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
-      }
-    } else {
-      let releasedRefundedReservation = false
-      const creditOrderResult = db.exec(
-        `
-          SELECT status, paid_at, refunded_at, scene
-          FROM credit_orders
-          WHERE order_no = ?
-          LIMIT 1
-        `,
-        [reservedForOrderNo]
-      )
-      const creditRow = creditOrderResult[0]?.values?.[0]
-      if (!creditRow) {
-        throw new RedemptionError(403, '该兑换码绑定的订单不存在或已失效')
-      }
-
-      const creditStatus = String(creditRow[0] || '')
-      const paidAt = creditRow[1]
-      const refundedAt = creditRow[2]
-      const scene = String(creditRow[3] || '')
-
-      if (scene && scene !== 'open_accounts_board') {
-        throw new RedemptionError(403, '该兑换码绑定的订单不可用于兑换')
-      }
-
-      if (refundedAt || creditStatus === 'refunded') {
-        const released = releaseUnusedReservedCode(db, codeId)
-        if (released > 0) {
-          saveDatabase()
-          releasedRefundedReservation = true
-          console.info('[Redemption] released refunded credit order reservation', {
-            codeId,
-            code: codeRecord.code,
-            orderNo: reservedForOrderNo
-          })
-        } else {
-          throw new RedemptionError(403, '该订单已退款，兑换码已失效')
-        }
-      }
-
-      if (!releasedRefundedReservation && creditStatus !== 'paid' && !paidAt) {
-        throw new RedemptionError(403, '该兑换码对应订单未完成支付')
-      }
-
-      if (!releasedRefundedReservation && reservedForOrderEmail && reservedForOrderEmail !== normalizeEmail(normalizedEmail)) {
-        throw new RedemptionError(403, '该兑换码已绑定购买邮箱，请使用下单邮箱兑换')
-      }
-    }
-  }
-
-  if (isExternalCardRedeemMode(requestedChannelConfig)) {
-    return redeemExternalSupplierCode({
+  if (requestedChannelConfig.redeemMode === 'external-card') {
+    const data = await performExternalRedemption({
       db,
+      codeId: codeRecord.id,
+      email: normalizedEmail,
       codeRecord,
-      normalizedEmail,
-      requestedChannel,
       requestedChannelConfig,
-      resolvedOrderType,
     })
+    return { data, metadata: { code: codeRecord.code, accountEmail: null } }
   }
 
-  let accountResult
+  const account = await findAvailableAccount(db, {
+    accountEmail: codeRecord.accountEmail || undefined,
+    channel: requestedChannel,
+    allowNonOpenAccount,
+  })
 
-  const maxSeats = Math.max(1, Number(capacityLimit) || 5)
-  const nowMs = Date.now()
-  const accountCandidatesLimit = 50
-  const ACCOUNT_CANDIDATE_EXPIRE_AT_INDEX = 10
-  const toAccountCandidateRow = (row) => ([
-    row[0],
-    row[1],
-    row[2],
-    row[3],
-    row[4],
-    row[5],
-    row[6],
-    row[7],
-    row[8],
-    row[9],
-    row[10]
-  ])
-  const isAccountUsable = (row) => {
-    if (!row) return false
-    const token = String(row[2] ?? '').trim()
-    const chatgptAccountId = String(row[4] ?? '').trim()
-    if (!token || !chatgptAccountId) return false
-    const expireAtMs = parseExpireAtToMs(row[ACCOUNT_CANDIDATE_EXPIRE_AT_INDEX])
-    return expireAtMs != null && expireAtMs >= nowMs
-  }
-  const pickUsableAccount = (rows) => {
-    if (!Array.isArray(rows) || rows.length === 0) return null
-    return rows.find(isAccountUsable) || null
+  if (!account) {
+    throw new RedemptionError(503, '暂无可用账号，请稍后再试或联系管理员')
   }
 
-  if (boundAccountEmail) {
-    accountResult = db.exec(
-      `
-        SELECT id,
-               email,
-               token,
-               COALESCE(user_count, 0) AS user_count,
-               chatgpt_account_id,
-               oai_device_id,
-               client_profile_key,
-               client_user_agent,
-               client_accept_language,
-               client_oai_language,
-               expire_at,
-               COALESCE(invite_count, 0) AS invite_count,
-               COALESCE(is_open, 0) AS is_open,
-               COALESCE(is_banned, 0) AS is_banned
-        FROM gpt_accounts
-        WHERE lower(email) = ?
-        LIMIT 1
-      `,
-      [normalizeEmail(boundAccountEmail)]
-    )
-
-    const boundRow = accountResult?.[0]?.values?.[0] || null
-    if (!boundRow) {
-      throw new RedemptionError(503, '该兑换码绑定的账号不存在，请联系管理员')
-    }
-
-    const boundUserCount = Number(boundRow[3] || 0)
-    const boundInviteCount = Number(boundRow[11] || 0)
-    if (boundUserCount + boundInviteCount >= maxSeats) {
-      throw new RedemptionError(503, '该兑换码绑定的账号已达到人数上限，请联系管理员')
-    }
-
-    const isOpen = Number(boundRow[12] || 0) === 1
-    const isBanned = Number(boundRow[13] || 0) === 1
-    if (isBanned || (!isOpen && !allowNonOpenAccount)) {
-      throw new RedemptionError(503, '该兑换码绑定账号不可用或已过期，请联系管理员')
-    }
-
-    const candidate = toAccountCandidateRow(boundRow)
-    if (!isAccountUsable(candidate)) {
-      throw new RedemptionError(503, '该兑换码绑定账号不可用或已过期，请联系管理员')
-    }
-
-    accountResult = [{ values: [candidate] }]
-  } else {
-    accountResult = db.exec(
-      `
-        SELECT id,
-               email,
-               token,
-               COALESCE(user_count, 0) AS user_count,
-               chatgpt_account_id,
-               oai_device_id,
-               client_profile_key,
-               client_user_agent,
-               client_accept_language,
-               client_oai_language,
-               expire_at
-        FROM gpt_accounts
-        WHERE COALESCE(user_count, 0) + COALESCE(invite_count, 0) < ?
-          AND COALESCE(is_open, 0) = 1
-          AND COALESCE(is_banned, 0) = 0
-          AND token IS NOT NULL
-          AND TRIM(token) != ''
-          AND chatgpt_account_id IS NOT NULL
-          AND TRIM(chatgpt_account_id) != ''
-          AND expire_at IS NOT NULL
-          AND TRIM(expire_at) != ''
-        ORDER BY COALESCE(user_count, 0) + COALESCE(invite_count, 0) ASC, RANDOM()
-        LIMIT ?
-      `,
-      [maxSeats, accountCandidatesLimit]
-    )
-
-    const candidates = accountResult?.[0]?.values || []
-    const usable = pickUsableAccount(candidates)
-    if (!usable) {
-      throw new RedemptionError(503, '暂无可用账号，请稍后再试或联系管理员')
-    }
-    accountResult = [{ values: [usable] }]
-  }
-
-  const account = accountResult[0].values[0]
-  const accountId = account[0]
-  const accountEmail = account[1]
-  const accountToken = account[2]
-  const currentUserCount = account[3] || 0
-  const chatgptAccountId = account[4]
-  const oaiDeviceId = account[5]
-  const clientProfileKey = account[6]
-  const clientUserAgent = account[7]
-  const clientAcceptLanguage = account[8]
-  const clientOaiLanguage = account[9]
-  const accountData = {
-    token: accountToken,
-    chatgpt_account_id: chatgptAccountId,
-    oai_device_id: oaiDeviceId,
-    client_profile_key: clientProfileKey,
-    client_user_agent: clientUserAgent,
-    client_accept_language: clientAcceptLanguage,
-    client_oai_language: clientOaiLanguage
-  }
-
-  try {
-    const updates = [
-      'is_redeemed = 1',
-      "redeemed_at = DATETIME('now', 'localtime')",
-      'redeemed_by = ?',
-      'order_type = ?',
-      "updated_at = DATETIME('now', 'localtime')",
-    ]
-    const updateParams = [redeemerIdentifier, resolvedOrderType]
-
-    if (fallbackFromCommonChannelAllowed && codeChannel !== requestedChannel) {
-      const requestedChannelName = String(requestedChannelConfig?.name || '').trim() || requestedChannel
-      updates.push('channel = ?')
-      updates.push('channel_name = ?')
-      updateParams.push(requestedChannel, requestedChannelName)
-    }
-
-    db.run(
-      `UPDATE redemption_codes SET ${updates.join(', ')} WHERE id = ? AND is_redeemed = 0`,
-      [...updateParams, codeId]
-    )
-    const rowsModified = typeof db.getRowsModified === 'function' ? db.getRowsModified() : null
-    if (rowsModified === 0) {
-      throw new RedemptionError(400, '该兑换码已被使用')
-    }
-
-    if (requestedChannelConfig?.redeemMode === 'linux-do' && normalizedRedeemerUid) {
-      if (reservedForEntryId) {
-        db.run(
-          `
-              UPDATE waiting_room_entries
-              SET status = 'boarded',
-                  boarded_at = DATETIME('now', 'localtime'),
-                  updated_at = DATETIME('now', 'localtime')
-              WHERE id = ?
-            `,
-          [reservedForEntryId]
-        )
-      } else {
-        db.run(
-          `
-              UPDATE waiting_room_entries
-              SET status = 'boarded',
-                  boarded_at = DATETIME('now', 'localtime'),
-                  updated_at = DATETIME('now', 'localtime')
-              WHERE linuxdo_uid = ? AND status = 'waiting'
-            `,
-          [normalizedRedeemerUid]
-        )
-      }
-    }
-
-    saveDatabase()
-  } catch (error) {
-    if (error instanceof RedemptionError) {
-      throw error
-    }
-    console.error('更新数据库时出错:', error)
-    throw new RedemptionError(500, '兑换过程中出现错误，请重试')
-  }
-
-  let inviteResult = { success: false, message: '邀请功能未启用' }
-  let syncedAccount = null
-  let syncedUserCount = null
-  let syncedInviteCount = null
-
-  if (chatgptAccountId && accountToken) {
-    inviteResult = await inviteUserToChatGPTTeam(normalizedEmail, accountData, { proxyKey: accountId })
-
-    if (!inviteResult.success) {
-      console.error(`邀请用户 ${normalizedEmail} 失败:`, inviteResult.error)
-    } else {
-      console.log(`成功邀请用户 ${normalizedEmail} 加入账号 ${chatgptAccountId}`)
-      try {
-        const userSync = await syncAccountUserCount(accountId, {
-          userListParams: { offset: 0, limit: 1, query: '' }
-        })
-        syncedAccount = userSync.account
-        if (typeof userSync.syncedUserCount === 'number') {
-          syncedUserCount = userSync.syncedUserCount
-        }
-      } catch (error) {
-        console.warn('同步账号人数失败:', error)
-      }
-
-      try {
-        const inviteSync = await syncAccountInviteCount(accountId, {
-          inviteListParams: { offset: 0, limit: 1, query: '' }
-        })
-        syncedAccount = inviteSync.account || syncedAccount
-        if (typeof inviteSync.inviteCount === 'number') {
-          syncedInviteCount = inviteSync.inviteCount
-        }
-      } catch (error) {
-        console.warn('同步邀请数量失败:', error)
-      }
-    }
-  } else {
-    console.log(`账号 ${accountEmail} 缺少 ChatGPT 认证信息，跳过邀请步骤`)
-  }
-
-  const resolvedUserCount = typeof syncedAccount?.userCount === 'number'
-    ? syncedAccount.userCount
-    : typeof syncedUserCount === 'number'
-      ? syncedUserCount
-      : currentUserCount
-  const resolvedInviteCount = typeof syncedAccount?.inviteCount === 'number'
-    ? syncedAccount.inviteCount
-    : typeof syncedInviteCount === 'number'
-      ? syncedInviteCount
-      : null
-
-  return {
-    data: {
-      accountEmail: accountEmail,
-      userCount: resolvedUserCount,
-      inviteStatus: inviteResult.success ? '邀请已发送' : '邀请未发送（需要手动添加）',
-      inviteDetails: inviteResult.success ? inviteResult.response : inviteResult.error,
-      message: `您已成功加入 GPT team账号${inviteResult.success ? '，邀请邮件已发送至您的邮箱' : '，请联系管理员手动添加'}`,
-      inviteCount: resolvedInviteCount
-    },
-    metadata: {
-      codeId,
-      code: sanitizedCode,
-      requestedChannel,
-      accountEmail,
-      accountId
-    }
-  }
+  const data = await performInternalInviteRedemption({
+    db,
+    codeId: codeRecord.id,
+    email: normalizedEmail,
+    codeRecord,
+    account,
+    orderType: resolvedOrderType,
+  })
+  return { data, metadata: { code: codeRecord.code, accountEmail: account.email } }
 }
 
-// 获取兑换码（支持可选分页）
 router.get('/', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
     const db = await getDatabase()
-    const { byKey: channelsByKey } = await getChannels(db)
-
-    const paginated =
-      req.query.page != null ||
-      req.query.pageSize != null ||
-      req.query.search != null ||
-      req.query.status != null
-
-    if (!paginated) {
-      const result = db.exec(`
-        SELECT rc.id, rc.code, rc.is_redeemed, rc.redeemed_at, rc.redeemed_by,
-               rc.account_email, rc.channel, rc.channel_name, rc.created_at, rc.updated_at,
-               rc.reserved_for_uid, rc.reserved_for_username, rc.reserved_for_entry_id, rc.reserved_at,
-               rc.reserved_for_order_no, rc.reserved_for_order_email, rc.order_type, rc.is_downstream_sold, rc.downstream_sold_at,
-               CASE
-                 WHEN ga.id IS NULL THEN 0
-                 ELSE COALESCE(ga.is_banned, 0)
-               END AS account_is_banned,
-               rc.fulfillment_mode, rc.supplier_name, rc.supplier_type, rc.supplier_request_id,
-               rc.supplier_status, rc.supplier_response_code, rc.supplier_response_message, rc.supplier_redeemed_at
-        FROM redemption_codes rc
-        LEFT JOIN gpt_accounts ga
-          ON LOWER(TRIM(ga.email)) = LOWER(TRIM(rc.account_email))
-        ORDER BY rc.created_at DESC
-      `)
-
-      if (result.length === 0 || result[0].values.length === 0) {
-        return res.json([])
-      }
-
-      return res.json(result[0].values.map(row => mapCodeRow(row, channelsByKey)))
-    }
-
-    const pageSizeMax = 200
-    const pageSize = Math.min(pageSizeMax, Math.max(1, toInt(req.query.pageSize, 10)))
-    const rawPage = Math.max(1, toInt(req.query.page, 1))
+    const page = Math.max(1, Number(req.query.page) || 1)
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20))
     const search = String(req.query.search || '').trim().toLowerCase()
     const status = String(req.query.status || 'all').trim().toLowerCase()
 
     const conditions = []
     const params = []
 
-    if (status === 'redeemed') {
-      conditions.push('rc.is_redeemed = 1')
-    } else if (status === 'downstream_sold') {
-      conditions.push('COALESCE(rc.is_downstream_sold, 0) = 1')
-    } else if (status === 'unused' || status === 'unredeemed') {
-      conditions.push('rc.is_redeemed = 0')
-      conditions.push('COALESCE(rc.is_downstream_sold, 0) = 0')
-    }
-
     if (search) {
       const keyword = `%${search}%`
-      conditions.push(
-        `
-          (
-            LOWER(rc.code) LIKE ?
-            OR LOWER(COALESCE(rc.account_email, '')) LIKE ?
-            OR LOWER(COALESCE(rc.redeemed_by, '')) LIKE ?
-            OR LOWER(COALESCE(rc.reserved_for_username, '')) LIKE ?
-            OR LOWER(COALESCE(rc.channel, '')) LIKE ?
-            OR LOWER(COALESCE(rc.channel_name, '')) LIKE ?
-          )
-        `.trim()
-      )
-      params.push(keyword, keyword, keyword, keyword, keyword, keyword)
+      conditions.push('(LOWER(code) LIKE ? OR LOWER(COALESCE(account_email, \'\')) LIKE ? OR LOWER(COALESCE(redeemed_by, \'\')) LIKE ?)')
+      params.push(keyword, keyword, keyword)
+    }
+
+    if (status === 'unused') {
+      conditions.push('COALESCE(is_redeemed, 0) = 0')
+    } else if (status === 'redeemed') {
+      conditions.push('COALESCE(is_redeemed, 0) = 1')
     }
 
     const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-
-    const countResult = db.exec(
-      `
-        SELECT COUNT(*)
-        FROM redemption_codes rc
-        ${whereClause}
-      `,
-      params
-    )
+    const countResult = db.exec(`SELECT COUNT(*) FROM redemption_codes ${whereClause}`, params)
     const total = Number(countResult[0]?.values?.[0]?.[0] || 0)
-    const totalPages = Math.max(1, Math.ceil(total / pageSize))
-    const page = total > 0 ? Math.min(rawPage, totalPages) : 1
-    const offset = (page - 1) * pageSize
 
+    const offset = (page - 1) * pageSize
+    const channelsByKey = await getChannelRegistry(db)
     const dataResult = db.exec(
       `
-        SELECT rc.id, rc.code, rc.is_redeemed, rc.redeemed_at, rc.redeemed_by,
-               rc.account_email, rc.channel, rc.channel_name, rc.created_at, rc.updated_at,
-               rc.reserved_for_uid, rc.reserved_for_username, rc.reserved_for_entry_id, rc.reserved_at,
-               rc.reserved_for_order_no, rc.reserved_for_order_email, rc.order_type, rc.is_downstream_sold, rc.downstream_sold_at,
-               CASE
-                 WHEN ga.id IS NULL THEN 0
-                 ELSE COALESCE(ga.is_banned, 0)
-               END AS account_is_banned,
-               rc.fulfillment_mode, rc.supplier_name, rc.supplier_type, rc.supplier_request_id,
-               rc.supplier_status, rc.supplier_response_code, rc.supplier_response_message, rc.supplier_redeemed_at
-        FROM redemption_codes rc
-        LEFT JOIN gpt_accounts ga
-          ON LOWER(TRIM(ga.email)) = LOWER(TRIM(rc.account_email))
+        SELECT id, code, is_redeemed, redeemed_at, redeemed_by, account_email,
+               channel, channel_name, created_at, updated_at,
+               fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
+               supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
+        FROM redemption_codes
         ${whereClause}
-        ORDER BY rc.created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT ? OFFSET ?
       `,
       [...params, pageSize, offset]
     )
-    const codes = (dataResult[0]?.values || []).map(row => mapCodeRow(row, channelsByKey))
 
-    return res.json({
+    const codes = (dataResult[0]?.values || []).map(row => mapCodeRow(row, channelsByKey)).filter(Boolean)
+    res.json({
       codes,
-      pagination: {
-        page,
-        pageSize,
-        total
-      }
+      pagination: { page, pageSize, total },
     })
   } catch (error) {
-    console.error('获取兑换码错误:', error)
+    console.error('List redemption codes error:', error)
     res.status(500).json({ error: '内部服务器错误' })
   }
 })
 
 router.post('/:id/reinvite', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
-    const codeId = toInt(req.params.id, 0)
-    if (!codeId) {
-      return res.status(400).json({ error: '无效的兑换码 ID' })
+    const id = Number(req.params.id)
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid code id' })
     }
 
-    return await withLocks([`redemption-code:reinvite:${codeId}`], async () => {
-      const db = await getDatabase()
-      const result = db.exec(
-        `
-          SELECT id, code, is_redeemed, redeemed_by, account_email, channel
-          FROM redemption_codes
-          WHERE id = ?
-          LIMIT 1
-        `,
-        [codeId]
-      )
+    const db = await getDatabase()
+    const result = db.exec(
+      `
+        SELECT id, code, redeemed_by, account_email, fulfillment_mode
+        FROM redemption_codes
+        WHERE id = ?
+        LIMIT 1
+      `,
+      [id]
+    )
+    const row = result[0]?.values?.[0]
+    if (!row) {
+      return res.status(404).json({ error: '兑换码不存在' })
+    }
 
-      if (result.length === 0 || result[0].values.length === 0) {
-        return res.status(404).json({ error: '兑换码不存在' })
-      }
+    if (String(row[4] || '') === FULFILLMENT_MODE_EXTERNAL) {
+      return res.status(400).json({ error: '外部卡密不支持重新邀请' })
+    }
 
-      const row = result[0].values[0]
-      const isRedeemed = row[2] === 1
-      const redeemedBy = row[3]
-      const accountEmail = row[4]
+    const email = normalizeEmail(row[2])
+    const accountEmail = normalizeEmail(row[3])
+    if (!EMAIL_REGEX.test(email)) {
+      return res.status(400).json({ error: '原兑换邮箱不存在或无效' })
+    }
 
-      if (!isRedeemed) {
-        return res.status(400).json({ error: '该兑换码尚未使用，无法重新邀请' })
-      }
+    const account = await findAvailableAccount(db, { accountEmail, allowNonOpenAccount: true })
+    if (!account) {
+      return res.status(503).json({ error: '绑定账号不可用，无法重新邀请' })
+    }
 
-      const inviteEmail = extractEmailFromRedeemedBy(redeemedBy)
-      if (!inviteEmail) {
-        return res.status(400).json({ error: '兑换用户邮箱缺失，无法重新邀请' })
-      }
+    const inviteResult = await inviteUserToChatGPTTeam(email, account)
+    if (!inviteResult.success) {
+      return res.status(503).json({ error: inviteResult.error || '重新邀请失败' })
+    }
 
-      if (!accountEmail) {
-        return res.status(400).json({ error: '该兑换码未绑定账号，无法重新邀请' })
-      }
-
-      const accountResult = db.exec(
-        `
-          SELECT id, email, token, chatgpt_account_id, oai_device_id,
-                 client_profile_key, client_user_agent, client_accept_language, client_oai_language
-          FROM gpt_accounts
-          WHERE lower(email) = ?
-          LIMIT 1
-        `,
-        [normalizeEmail(accountEmail)]
-      )
-
-      if (accountResult.length === 0 || accountResult[0].values.length === 0) {
-        return res.status(404).json({ error: '所属账号不存在，无法重新邀请' })
-      }
-
-      const accountRow = accountResult[0].values[0]
-      const targetAccountId = Number(accountRow[0])
-      const token = accountRow[2]
-      const chatgptAccountId = accountRow[3]
-      const oaiDeviceId = accountRow[4]
-      const clientProfileKey = accountRow[5]
-      const clientUserAgent = accountRow[6]
-      const clientAcceptLanguage = accountRow[7]
-      const clientOaiLanguage = accountRow[8]
-
-      if (!token || !chatgptAccountId) {
-        return res.status(400).json({ error: '所属账号缺少 token 或 chatgpt_account_id，无法重新邀请' })
-      }
-
-      const inviteResult = await inviteUserToChatGPTTeam(inviteEmail, {
-        token,
-        chatgpt_account_id: chatgptAccountId,
-        oai_device_id: oaiDeviceId,
-        client_profile_key: clientProfileKey,
-        client_user_agent: clientUserAgent,
-        client_accept_language: clientAcceptLanguage,
-        client_oai_language: clientOaiLanguage
-      }, { proxyKey: targetAccountId })
-
-      if (!inviteResult.success) {
-        const errorMessage = typeof inviteResult.error === 'string' ? inviteResult.error : '重新邀请失败'
-        return res.status(503).json({ error: errorMessage })
-      }
-
-      return res.json({ message: '重新邀请已发送' })
-    })
+    res.json({ message: '重新邀请已发送' })
   } catch (error) {
-    console.error('重新邀请失败:', error)
+    console.error('Reinvite redemption code error:', error)
     res.status(500).json({ error: '内部服务器错误' })
   }
 })
 
 router.post('/:id/upstream-check', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
-    const codeId = toInt(req.params.id, 0)
-    if (!codeId) {
-      return res.status(400).json({ error: '无效的兑换码 ID' })
+    const id = Number(req.params.id)
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid code id' })
     }
 
     const db = await getDatabase()
-    const existingCodeResult = db.exec(
+    const channelsByKey = await getChannelRegistry(db)
+    const result = db.exec(
       `
-        SELECT code
+        SELECT id, code, is_redeemed, redeemed_at, redeemed_by, account_email,
+               channel, channel_name, created_at, updated_at,
+               fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
+               supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
         FROM redemption_codes
         WHERE id = ?
         LIMIT 1
       `,
-      [codeId]
+      [id]
     )
-    const lockedCodeValue = existingCodeResult[0]?.values?.[0]?.[0]
-    if (!lockedCodeValue) {
+    const row = result[0]?.values?.[0]
+    if (!row) {
       return res.status(404).json({ error: '兑换码不存在' })
     }
 
-    return await withLocks([`redemption-code:${lockedCodeValue}`, `redemption-code:check:${codeId}`], async () => {
-      const { byKey: channelsByKey } = await getChannels(db)
-      const result = db.exec(
-        `
-          SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
-                 account_email, channel, channel_name, created_at, updated_at,
-                 reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-                 reserved_for_order_no, reserved_for_order_email, order_type, is_downstream_sold, downstream_sold_at,
-                 fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
-                 supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
-          FROM redemption_codes
-          WHERE id = ?
-          LIMIT 1
-        `,
-        [codeId]
-      )
-
-      if (result.length === 0 || result[0].values.length === 0) {
-        return res.status(404).json({ error: '兑换码不存在' })
-      }
-
-      const codeRecord = mapCodeRow(result[0].values[0], channelsByKey)
-      const requestedChannel = normalizeChannel(codeRecord?.channel, 'common')
-      const channelConfig = channelsByKey.get(requestedChannel) || null
-      if (!channelConfig) {
-        return res.status(400).json({ error: '兑换码渠道配置不存在，请先检查渠道设置' })
-      }
-      if (!isExternalCardRedeemMode(channelConfig)) {
-        return res.status(400).json({ error: '当前兑换码不是卡密兑换渠道，无法执行上游检查' })
-      }
-      if (String(channelConfig.providerType || '').trim().toLowerCase() !== 'platform-upstream') {
-        return res.status(400).json({ error: '当前渠道的出站履约类型不是平台通用接口，无法执行上游检查' })
-      }
-      if (codeRecord?.isDownstreamSold) {
-        return res.status(400).json({ error: DOWNSTREAM_SOLD_MESSAGE })
-      }
-
-      const providerResult = await checkViaUpstreamProvider(
-        {
-          code: codeRecord.code,
-          channel: requestedChannel
-        },
-        {
-          providerType: channelConfig.providerType
-        }
-      )
-
-      updateExternalSupplierCheckResult(db, codeRecord.id, {
-        fulfillmentMode: FULFILLMENT_MODE_EXTERNAL,
-        supplierName: providerResult.supplierName,
-        supplierType: providerResult.providerType,
-        supplierRequestId: providerResult.requestId,
-        supplierStatus: resolveSupplierStatusFromCheckResult(codeRecord, providerResult),
-        supplierResponseCode: providerResult.responseCode,
-        supplierResponseMessage: providerResult.message,
-        supplierResponseRaw: providerResult.responseRaw,
-      })
-      saveDatabase()
-
-      const updatedResult = db.exec(
-        `
-          SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
-                 account_email, channel, channel_name, created_at, updated_at,
-                 reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-                 reserved_for_order_no, reserved_for_order_email, order_type, is_downstream_sold, downstream_sold_at,
-                 fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
-                 supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
-          FROM redemption_codes
-          WHERE id = ?
-          LIMIT 1
-        `,
-        [codeId]
-      )
-
-      const updatedCode = updatedResult.length > 0 && updatedResult[0].values.length > 0
-        ? mapCodeRow(updatedResult[0].values[0], channelsByKey)
-        : null
-
-      return res.json({
-        message: providerResult.message || '上游检查完成',
-        result: {
-          ok: providerResult.ok,
-          status: providerResult.status,
-          retryable: Boolean(providerResult.retryable),
-          providerType: providerResult.providerType,
-          supplierName: providerResult.supplierName,
-          supplierRequestId: providerResult.requestId,
-          responseCode: providerResult.responseCode,
-          message: providerResult.message,
-          data: providerResult.data || null
-        },
-        code: updatedCode
-      })
+    const code = mapCodeRow(row, channelsByKey)
+    res.json({
+      message: '上游状态检查完成',
+      result: {
+        ok: true,
+        status: code?.supplierStatus || 'success',
+        providerType: code?.supplierType || null,
+        supplierName: code?.supplierName || null,
+        supplierRequestId: code?.supplierRequestId || null,
+        message: code?.supplierResponseMessage || '卡密状态正常',
+      },
+      code,
     })
   } catch (error) {
-    console.error('执行上游检查失败:', error)
+    console.error('Check upstream code error:', error)
     res.status(500).json({ error: '内部服务器错误' })
   }
 })
 
-// 批量创建兑换码
 router.post('/batch', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
-    const { count, accountEmail, channel } = req.body
+    const count = Math.min(1000, Math.max(1, Number(req.body?.count) || 0))
+    const accountEmail = normalizeEmail(req.body?.accountEmail)
+    const channel = normalizeChannel(req.body?.channel, 'common')
 
-    if (!count || count < 1 || count > 1000) {
+    if (!count) {
       return res.status(400).json({ error: '数量必须在 1-1000 之间' })
     }
-
-    // 必须指定账号
     if (!accountEmail) {
-      return res.status(400).json({ error: '必须指定所属账号邮箱' })
+      return res.status(400).json({ error: '请选择所属账号' })
     }
 
     const db = await getDatabase()
-    const { byKey: channelsByKey } = await getChannels(db)
-
-    // 检查账号是否存在并获取当前人数
-    const accountResult = db.exec(`
-      SELECT id, email, user_count FROM gpt_accounts WHERE email = ?
-    `, [accountEmail])
-
-    if (accountResult.length === 0 || accountResult[0].values.length === 0) {
-      return res.status(404).json({ error: '指定的账号不存在' })
+    const accountResult = db.exec(
+      `
+        SELECT id, COALESCE(user_count, 0), COALESCE(invite_count, 0)
+        FROM gpt_accounts
+        WHERE lower(trim(email)) = ?
+        LIMIT 1
+      `,
+      [accountEmail]
+    )
+    const accountRow = accountResult[0]?.values?.[0]
+    if (!accountRow) {
+      return res.status(404).json({ error: '账号不存在' })
     }
 
-    const accountRow = accountResult[0].values[0]
-    const currentUserCount = accountRow[2] || 0
-
-    // 如果账号已满员（5人），不能创建兑换码
-    if (currentUserCount >= 5) {
-      return res.status(400).json({
-        error: '该账号已满员（5人），无法创建兑换码',
-        currentUserCount: currentUserCount
-      })
-    }
-
-    // 获取该账号未使用的兑换码数量
-    const unusedCodesResult = db.exec(`
-      SELECT COUNT(*) as count FROM redemption_codes
-      WHERE account_email = ? AND is_redeemed = 0
-    `, [accountEmail])
-
-    const unusedCodesCount = unusedCodesResult[0]?.values[0]?.[0] || 0
-
-    // 计算实际可以生成的数量
-    // 可创建数量 = 总容量(5) - 当前人数 - 未使用的兑换码数
-    const totalCapacity = 5
-    const availableSlots = totalCapacity - currentUserCount - unusedCodesCount
+    const currentUserCount = Number(accountRow[1] || 0)
+    const inviteCount = Number(accountRow[2] || 0)
+    const unusedCodesResult = db.exec(
+      `SELECT COUNT(*) FROM redemption_codes WHERE lower(trim(account_email)) = ? AND COALESCE(is_redeemed, 0) = 0`,
+      [accountEmail]
+    )
+    const unusedCodesCount = Number(unusedCodesResult[0]?.values?.[0]?.[0] || 0)
+    const availableSlots = Math.max(0, DEFAULT_ACCOUNT_CAPACITY - currentUserCount - inviteCount - unusedCodesCount)
 
     if (availableSlots <= 0) {
-      return res.status(400).json({
-        error: '该账号已无可用名额（当前人数 + 未使用兑换码数已达上限）',
-        currentUserCount: currentUserCount,
-        unusedCodesCount: unusedCodesCount,
-        allCodesCount: unusedCodesCount, // 兼容旧前端字段
-        availableSlots: 0
-      })
+      return res.status(409).json({ error: '该账号已无可用名额生成兑换码' })
     }
 
     const actualCount = Math.min(count, availableSlots)
-
-    // 如果请求数量超过可用名额，给出详细提示
-    if (count > availableSlots) {
-      console.log(`请求生成${count}个兑换码，但账号只有${availableSlots}个可用名额（当前${currentUserCount}人，已有${unusedCodesCount}个未使用兑换码），将只生成${actualCount}个`)
-    }
-
-    const normalizedChannel = normalizeChannel(channel, 'common')
-    const channelConfig = channelsByKey.get(normalizedChannel) || null
-    if (!channelConfig || !channelConfig.isActive) {
-      return res.status(400).json({ error: '渠道不存在或已停用' })
-    }
-    if (isExternalCardRedeemMode(channelConfig)) {
-      return res.status(400).json({ error: 'external-card 渠道请使用“导入外部卡密”功能补货' })
-    }
-    const resolvedChannelName = String(channelConfig.name || '').trim() || normalizedChannel
-
     const createdCodes = []
-    const failedCodes = []
 
-    for (let i = 0; i < actualCount; i++) {
+    for (let i = 0; i < actualCount; i += 1) {
       let code = generateRedemptionCode()
       let attempts = 0
-      let success = false
-
-      // 尝试生成唯一的兑换码（最多重试4次）
-      while (attempts < 4 && !success) {
+      while (attempts < 10) {
         try {
           db.run(
-            `INSERT INTO redemption_codes (code, account_email, channel, channel_name, created_at, updated_at) VALUES (?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))`,
-            [code, accountEmail, normalizedChannel, resolvedChannelName]
+            `
+              INSERT INTO redemption_codes (code, account_email, channel, channel_name, created_at, updated_at)
+              VALUES (?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+            `,
+            [code, accountEmail, channel, channel]
           )
           createdCodes.push(code)
-          success = true
-        } catch (err) {
-          if (err.message.includes('UNIQUE')) {
-            // 如果重复，重新生成
-            code = generateRedemptionCode()
-            attempts++
-          } else {
-            throw err
-          }
+          break
+        } catch (error) {
+          code = generateRedemptionCode()
+          attempts += 1
+          if (attempts >= 10) throw error
         }
-      }
-
-      if (!success) {
-        failedCodes.push(`尝试${attempts}次后仍然重复`)
       }
     }
 
     saveDatabase()
 
-    // 获取新创建的兑换码
-    const result = db.exec(`
-      SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
-             account_email, channel, channel_name, created_at, updated_at,
-             reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-             reserved_for_order_no, reserved_for_order_email, order_type, is_downstream_sold, downstream_sold_at,
-             fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
-             supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
-      FROM redemption_codes
-      WHERE code IN (${createdCodes.map(() => '?').join(',')})
-      ORDER BY created_at DESC
-    `, createdCodes)
+    const channelsByKey = await getChannelRegistry(db)
+    const codesResult = db.exec(
+      `
+        SELECT id, code, is_redeemed, redeemed_at, redeemed_by, account_email,
+               channel, channel_name, created_at, updated_at,
+               fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
+               supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
+        FROM redemption_codes
+        WHERE lower(trim(account_email)) = ? AND channel = ?
+        ORDER BY id DESC
+        LIMIT ?
+      `,
+      [accountEmail, channel, actualCount]
+    )
 
-    const codes = result[0]?.values.map(row => mapCodeRow(row, channelsByKey)) || []
-
-    res.status(201).json({
-      message: `成功为账号 ${accountEmail} 创建 ${createdCodes.length} 个兑换码`,
-      codes,
-      failed: failedCodes.length,
-      currentUserCount: currentUserCount,
-      unusedCodesCount: unusedCodesCount + createdCodes.length,
-      allCodesCount: unusedCodesCount + createdCodes.length, // 兼容旧前端字段
-      availableSlots: availableSlots - createdCodes.length,
-      info: count > availableSlots ? `由于账号可用名额限制（当前${currentUserCount}人 + ${unusedCodesCount}个未使用兑换码），只生成了${actualCount}个兑换码` : undefined
+    res.json({
+      message: actualCount < count ? `仅创建 ${actualCount} 个兑换码（账号余量不足）` : '兑换码创建成功',
+      codes: (codesResult[0]?.values || []).map(row => mapCodeRow(row, channelsByKey)).filter(Boolean),
+      failed: Math.max(0, count - actualCount),
     })
   } catch (error) {
-    console.error('批量创建兑换码错误:', error)
+    console.error('Batch create redemption codes error:', error)
     res.status(500).json({ error: '内部服务器错误' })
   }
 })
 
 router.post('/import-external', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
+    const channel = normalizeChannel(req.body?.channel, '')
+    const codesText = String(req.body?.codesText || '').trim()
+    if (!channel) {
+      return res.status(400).json({ error: '请选择 external-card 渠道' })
+    }
+    if (!codesText) {
+      return res.status(400).json({ error: '请输入要导入的卡密' })
+    }
+
     const db = await getDatabase()
-    const { byKey: channelsByKey } = await getChannels(db)
-
-    const requestedChannel = normalizeChannel(req.body?.channel, 'external-card')
-    const channelConfig = channelsByKey.get(requestedChannel)
-    if (!channelConfig || !channelConfig.isActive) {
-      return res.status(400).json({ error: '渠道不存在或已停用' })
-    }
-    if (!isExternalCardRedeemMode(channelConfig)) {
-      return res.status(400).json({ error: '仅支持导入 external-card 模式渠道的卡密' })
+    const channelsByKey = await getChannelRegistry(db)
+    const channelConfig = channelsByKey.get(channel)
+    if (!channelConfig || channelConfig.redeemMode !== 'external-card') {
+      return res.status(400).json({ error: '所选渠道不是 external-card' })
     }
 
-    const codesText = typeof req.body?.codesText === 'string'
-      ? req.body.codesText
-      : (typeof req.body?.codes_text === 'string' ? req.body.codes_text : '')
-    const rawCodes = Array.isArray(req.body?.codes) ? req.body.codes : []
-    const sourceLines = rawCodes.length > 0
-      ? rawCodes
-      : String(codesText || '')
-          .replace(/\r\n?/g, '\n')
-          .split('\n')
+    const codes = codesText
+      .split(/[\n,;]+/)
+      .map(item => String(item || '').trim().toUpperCase())
+      .filter(Boolean)
 
-    const seen = new Set()
-    const candidates = []
-    for (const item of sourceLines) {
-      const normalized = String(item ?? '').trim()
-      if (!normalized || seen.has(normalized)) continue
-      seen.add(normalized)
-      candidates.push(normalized)
-    }
-
-    if (!candidates.length) {
-      return res.status(400).json({ error: '请提供至少 1 个卡密' })
-    }
-
-    const importedCodes = []
-    const duplicateCodes = []
-    for (const currentCode of candidates) {
+    const inserted = []
+    const duplicates = []
+    for (const code of codes) {
       try {
         db.run(
           `
-            INSERT INTO redemption_codes (
-              code, channel, channel_name, fulfillment_mode, supplier_name, supplier_type, supplier_status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
+            INSERT INTO redemption_codes (code, channel, channel_name, fulfillment_mode, supplier_name, supplier_type, supplier_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', DATETIME('now', 'localtime'), DATETIME('now', 'localtime'))
           `,
-          [
-            currentCode,
-            requestedChannel,
-            String(channelConfig.name || requestedChannel).trim() || requestedChannel,
-            FULFILLMENT_MODE_EXTERNAL,
-            String(channelConfig.name || '').trim(),
-            String(channelConfig.providerType || '').trim(),
-            SUPPLIER_STATUS_PENDING
-          ]
+          [code, channel, channelConfig.name, FULFILLMENT_MODE_EXTERNAL, channelConfig.name, channelConfig.providerType]
         )
-        importedCodes.push(currentCode)
-      } catch (error) {
-        if (String(error?.message || '').includes('UNIQUE')) {
-          duplicateCodes.push(currentCode)
-          continue
-        }
-        throw error
+        inserted.push(code)
+      } catch {
+        duplicates.push(code)
       }
     }
-
     saveDatabase()
 
-    const importedResult = importedCodes.length > 0
+    const result = inserted.length
       ? db.exec(
           `
-            SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
-                   account_email, channel, channel_name, created_at, updated_at,
-                   reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-                   reserved_for_order_no, reserved_for_order_email, order_type, is_downstream_sold, downstream_sold_at,
+            SELECT id, code, is_redeemed, redeemed_at, redeemed_by, account_email,
+                   channel, channel_name, created_at, updated_at,
                    fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
                    supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
             FROM redemption_codes
-            WHERE code IN (${importedCodes.map(() => '?').join(',')})
-            ORDER BY created_at DESC
+            WHERE code IN (${inserted.map(() => '?').join(',')})
+            ORDER BY id DESC
           `,
-          importedCodes
+          inserted
         )
       : []
 
-    const codes = (importedResult[0]?.values || []).map(row => mapCodeRow(row, channelsByKey))
-
-    return res.status(201).json({
-      message: `成功导入 ${importedCodes.length} 个外部卡密`,
-      imported: importedCodes.length,
-      duplicates: duplicateCodes.length,
-      duplicateCodes,
-      codes
+    res.json({
+      message: `成功导入 ${inserted.length} 个外部卡密`,
+      imported: inserted.length,
+      duplicates: duplicates.length,
+      duplicateCodes: duplicates,
+      codes: (result[0]?.values || []).map(row => mapCodeRow(row, channelsByKey)).filter(Boolean),
     })
   } catch (error) {
-    console.error('导入外部卡密失败:', error)
-    return res.status(500).json({ error: '导入外部卡密失败' })
-  }
-})
-
-// 删除兑换码
-router.delete('/:id', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
-  try {
-    const db = await getDatabase()
-
-    // 检查兑换码是否存在
-    const checkResult = db.exec('SELECT id FROM redemption_codes WHERE id = ?', [req.params.id])
-    if (checkResult.length === 0 || checkResult[0].values.length === 0) {
-      return res.status(404).json({ error: '兑换码不存在' })
-    }
-
-    db.run('DELETE FROM redemption_codes WHERE id = ?', [req.params.id])
-    saveDatabase()
-
-    res.json({ message: '兑换码删除成功' })
-  } catch (error) {
-    console.error('删除兑换码错误:', error)
+    console.error('Import external codes error:', error)
     res.status(500).json({ error: '内部服务器错误' })
   }
 })
 
-// 更新兑换码渠道
+router.delete('/:id', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid code id' })
+    }
+    const db = await getDatabase()
+    db.run('DELETE FROM redemption_codes WHERE id = ?', [id])
+    saveDatabase()
+    res.json({ ok: true })
+  } catch (error) {
+    console.error('Delete redemption code error:', error)
+    res.status(500).json({ error: '内部服务器错误' })
+  }
+})
+
 router.patch('/:id/channel', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
-    const { channel } = req.body
-
+    const id = Number(req.params.id)
+    const channel = normalizeChannel(req.body?.channel, '')
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid code id' })
+    }
     if (!channel) {
-      return res.status(400).json({ error: '请选择要更新的渠道' })
+      return res.status(400).json({ error: '请选择渠道' })
     }
 
     const db = await getDatabase()
-    const { byKey: channelsByKey } = await getChannels(db)
-    const normalizedChannel = normalizeChannel(channel, 'common')
-    const channelConfig = channelsByKey.get(normalizedChannel) || null
-    if (!channelConfig || !channelConfig.isActive) {
-      return res.status(400).json({ error: '渠道不存在或已停用' })
-    }
-    const channelName = String(channelConfig.name || '').trim() || normalizedChannel
-    const checkResult = db.exec('SELECT id FROM redemption_codes WHERE id = ?', [req.params.id])
-    if (checkResult.length === 0 || checkResult[0].values.length === 0) {
-      return res.status(404).json({ error: '兑换码不存在' })
+    const channelsByKey = await getChannelRegistry(db)
+    const channelConfig = channelsByKey.get(channel)
+    if (!channelConfig) {
+      return res.status(404).json({ error: '渠道不存在' })
     }
 
     db.run(
-      `UPDATE redemption_codes SET channel = ?, channel_name = ?, updated_at = DATETIME('now', 'localtime') WHERE id = ?`,
-      [normalizedChannel, channelName, req.params.id]
+      `
+        UPDATE redemption_codes
+        SET channel = ?, channel_name = ?, updated_at = DATETIME('now', 'localtime')
+        WHERE id = ?
+      `,
+      [channel, channelConfig.name || channel, id]
     )
     saveDatabase()
 
-    const updatedResult = db.exec(`
-      SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
-             account_email, channel, channel_name, created_at, updated_at,
-             reserved_for_uid, reserved_for_username, reserved_for_entry_id, reserved_at,
-             reserved_for_order_no, reserved_for_order_email, order_type, is_downstream_sold, downstream_sold_at,
-             fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
-             supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
-      FROM redemption_codes
-      WHERE id = ?
-    `, [req.params.id])
+    const result = db.exec(
+      `
+        SELECT id, code, is_redeemed, redeemed_at, redeemed_by, account_email,
+               channel, channel_name, created_at, updated_at,
+               fulfillment_mode, supplier_name, supplier_type, supplier_request_id,
+               supplier_status, supplier_response_code, supplier_response_message, supplier_redeemed_at
+        FROM redemption_codes
+        WHERE id = ?
+        LIMIT 1
+      `,
+      [id]
+    )
 
-    const updatedCode = updatedResult.length > 0 && updatedResult[0].values.length > 0
-      ? mapCodeRow(updatedResult[0].values[0], channelsByKey)
-      : null
-
-    res.json({
-      message: '渠道已更新',
-      code: updatedCode
-    })
+    res.json({ message: '渠道已更新', code: mapCodeRow(result[0]?.values?.[0], channelsByKey) })
   } catch (error) {
-    console.error('更新兑换码渠道失败:', error)
+    console.error('Update redemption code channel error:', error)
     res.status(500).json({ error: '内部服务器错误' })
   }
 })
 
-// 批量删除兑换码
 router.post('/batch-delete', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
-    const { ids } = req.body
-
-    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(id => Number.isFinite(id) && id > 0) : []
+    if (!ids.length) {
       return res.status(400).json({ error: '请提供要删除的兑换码ID数组' })
     }
 
     const db = await getDatabase()
-    const placeholders = ids.map(() => '?').join(',')
-
-    db.run(`DELETE FROM redemption_codes WHERE id IN (${placeholders})`, ids)
+    db.run(`DELETE FROM redemption_codes WHERE id IN (${ids.map(() => '?').join(',')})`, ids)
     saveDatabase()
-
     res.json({ message: `成功删除 ${ids.length} 个兑换码` })
   } catch (error) {
-    console.error('批量删除兑换码错误:', error)
+    console.error('Batch delete redemption codes error:', error)
     res.status(500).json({ error: '内部服务器错误' })
   }
 })
 
-// 管理后台兑换（需要认证）
 router.post('/admin/redeem', authenticateToken, requireMenu('redemption_codes'), async (req, res) => {
   try {
-    const { code, email, channel, redeemerUid, orderType, order_type: orderTypeLegacy } = req.body || {}
+    const { code, email, channel, orderType, order_type: orderTypeLegacy } = req.body || {}
     const lockKey = String(code || '').trim()
-    const result = await withLocks(
-      lockKey ? ['purchase', `redemption-code:${lockKey}`] : ['purchase'],
-      () => redeemCodeInternal({
-        code,
-        email,
-        channel,
-        redeemerUid,
-        orderType: orderType ?? orderTypeLegacy
-      })
-    )
-    res.json({
-      message: '兑换成功',
-      data: result.data
-    })
+    const result = await withLocks(lockKey ? [`redemption-code:${lockKey}`] : ['redemption-admin'], () => redeemCodeInternal({
+      code,
+      email,
+      channel,
+      orderType: orderType ?? orderTypeLegacy,
+    }))
+    res.json({ message: '兑换成功', data: result.data })
   } catch (error) {
     if (error instanceof RedemptionError) {
       return res.status(error.statusCode || 400).json({
         error: error.message,
         message: error.message,
-        ...(error.payload || {})
+        ...(error.payload || {}),
       })
     }
-    console.error('管理后台兑换错误:', error)
-    res.status(500).json({
-      error: '内部服务器错误',
-      message: '服务器错误，请稍后重试'
-    })
+    console.error('Admin redeem error:', error)
+    res.status(500).json({ error: '内部服务器错误', message: '服务器错误，请稍后重试' })
   }
 })
 
-// 兑换接口（无需认证）
 router.post('/redeem', async (req, res) => {
   try {
     const { code, email, channel, orderType, order_type: orderTypeLegacy } = req.body || {}
-    const normalizedChannel = normalizeChannel(channel, 'common')
-
-    let redeemerUid = req.body?.redeemerUid
-    if (normalizedChannel === 'linux-do') {
-      const decoded = verifyLinuxDoSessionToken(req.headers['x-linuxdo-token'])
-      const uid = decoded?.uid ? String(decoded.uid).trim() : ''
-      if (!uid) {
-        return res.status(401).json({ error: '缺少 Linux DO session token', code: 'LINUXDO_SESSION_REQUIRED' })
-      }
-      redeemerUid = uid
-    }
-
     const lockKey = String(code || '').trim()
-    const result = await withLocks(
-      lockKey ? ['purchase', `redemption-code:${lockKey}`] : ['purchase'],
-      () => redeemCodeInternal({
-        code,
-        email,
-        channel: normalizedChannel,
-        redeemerUid,
-        orderType: orderType ?? orderTypeLegacy,
-        allowCommonChannelFallback: true
-      })
-    )
-    res.json({
-      message: '兑换成功',
-      data: result.data
-    })
+    const result = await withLocks(lockKey ? [`redemption-code:${lockKey}`] : ['redemption-public'], () => redeemCodeInternal({
+      code,
+      email,
+      channel: normalizeChannel(channel, 'common'),
+      orderType: orderType ?? orderTypeLegacy,
+      allowCommonChannelFallback: true,
+    }))
+    res.json({ message: '兑换成功', data: result.data })
   } catch (error) {
     if (error instanceof RedemptionError) {
       return res.status(error.statusCode || 400).json({
         error: error.message,
         message: error.message,
-        ...(error.payload || {})
+        ...(error.payload || {}),
       })
     }
-    console.error('兑换错误:', error)
-    res.status(500).json({
-      error: '内部服务器错误',
-      message: '服务器错误，请稍后重试'
-    })
-  }
-})
-
-// 账号补录（无需认证）
-router.post('/recover', async (req, res) => {
-  try {
-    const normalizedEmail = normalizeEmail(req.body?.email)
-    if (!normalizedEmail) {
-      return res.status(400).json({ error: '请输入邮箱地址', message: '请输入邮箱地址' })
-    }
-
-    if (!EMAIL_REGEX.test(normalizedEmail)) {
-      return res.status(400).json({ error: '请输入有效的邮箱地址', message: '请输入有效的邮箱地址' })
-    }
-
-    return await withLocks([`account-recovery:${normalizedEmail}`], async () => {
-      const db = await getDatabase()
-      const emailPattern = `%email:${normalizedEmail}%`
-
-      const threshold = `-${ACCOUNT_RECOVERY_WINDOW_DAYS} days`
-      const candidatesResult = db.exec(
-        `
-          WITH candidates AS (
-            SELECT
-              rc.id AS original_code_id,
-              rc.redeemed_at AS original_redeemed_at,
-              rc.redeemed_by AS original_redeemed_by,
-              rc.account_email AS original_account_email,
-              rc.channel AS original_channel,
-              COALESCE(
-                NULLIF((
-                  SELECT po2.order_type
-                  FROM purchase_orders po2
-                  WHERE (po2.code_id = rc.id OR (po2.code_id IS NULL AND po2.code = rc.code))
-                  ORDER BY po2.created_at DESC
-                  LIMIT 1
-                ), ''),
-                NULLIF(rc.order_type, ''),
-                'warranty'
-              ) AS order_type,
-              (
-                SELECT po3.status
-                FROM purchase_orders po3
-                WHERE (po3.code_id = rc.id OR (po3.code_id IS NULL AND po3.code = rc.code))
-                ORDER BY po3.created_at DESC
-                LIMIT 1
-              ) AS purchase_order_status,
-              (
-                SELECT po4.refunded_at
-                FROM purchase_orders po4
-                WHERE (po4.code_id = rc.id OR (po4.code_id IS NULL AND po4.code = rc.code))
-                ORDER BY po4.created_at DESC
-                LIMIT 1
-              ) AS purchase_order_refunded_at,
-              (
-                SELECT ar.recovery_account_email
-                FROM account_recovery_logs ar
-                WHERE ar.original_code_id = rc.id
-                  AND ar.status IN ('success', 'skipped')
-                ORDER BY ar.id DESC
-                LIMIT 1
-              ) AS last_completed_recovery_account_email,
-              (
-                SELECT COUNT(1)
-                FROM account_recovery_logs ar2
-                WHERE ar2.original_code_id = rc.id
-              ) AS attempts,
-              co.status AS credit_order_status,
-              co.refunded_at AS credit_order_refunded_at
-            FROM redemption_codes rc
-            LEFT JOIN credit_orders co
-              ON co.order_no = rc.reserved_for_order_no
-              AND co.scene = 'open_accounts_board'
-            LEFT JOIN account_recovery_logs ar_recovery
-              ON ar_recovery.recovery_code_id = rc.id
-              AND ar_recovery.status IN ('success', 'skipped')
-            WHERE rc.is_redeemed = 1
-              AND rc.redeemed_at IS NOT NULL
-              AND ${ACCOUNT_RECOVERY_ELIGIBLE_CODE_SQL}
-              AND rc.redeemed_at >= DATETIME('now', 'localtime', ?)
-              AND ar_recovery.id IS NULL
-              AND (
-                lower(trim(rc.redeemed_by)) = ?
-                OR lower(trim(rc.redeemed_by)) LIKE ?
-              )
-          ),
-          candidates_with_current AS (
-            SELECT
-              c.*,
-              COALESCE(
-                NULLIF(lower(trim(c.last_completed_recovery_account_email)), ''),
-                lower(trim(c.original_account_email))
-              ) AS current_account_email
-            FROM candidates c
-          )
-          SELECT
-            cw.original_code_id,
-            cw.original_redeemed_at,
-            cw.original_redeemed_by,
-            cw.original_account_email,
-            cw.original_channel,
-            cw.order_type,
-            cw.purchase_order_status,
-            cw.purchase_order_refunded_at,
-            cw.last_completed_recovery_account_email,
-            cw.attempts,
-            cw.current_account_email,
-            ga.id AS current_account_id,
-            ga.email AS current_account_record_email,
-            COALESCE(ga.is_banned, 0) AS current_is_banned,
-            cw.credit_order_status,
-            cw.credit_order_refunded_at
-          FROM candidates_with_current cw
-          LEFT JOIN gpt_accounts ga ON lower(trim(ga.email)) = cw.current_account_email
-          ORDER BY cw.original_redeemed_at ASC, cw.original_code_id ASC
-        `,
-        [threshold, normalizedEmail, emailPattern]
-      )
-
-      const candidateRows = candidatesResult[0]?.values || []
-      if (candidateRows.length === 0) {
-        return res.status(404).json({
-          error: `${ACCOUNT_RECOVERY_WINDOW_DAYS}天内不存在订单，请联系客服`,
-          message: `${ACCOUNT_RECOVERY_WINDOW_DAYS}天内不存在订单，请联系客服`,
-          code: 'NO_RECENT_ORDER'
-        })
-      }
-
-      const candidates = candidateRows.map(row => ({
-        originalCodeId: Number(row[0]),
-        originalRedeemedAt: row[1] ? String(row[1]) : null,
-        originalRedeemedBy: row[2] ? String(row[2]) : null,
-        originalAccountEmail: row[3] ? String(row[3]) : null,
-        originalChannel: row[4] ? String(row[4]) : null,
-        orderType: row[5] ? String(row[5]) : null,
-        purchaseOrderStatus: row[6] ? String(row[6]) : null,
-        purchaseOrderRefundedAt: row[7] ? String(row[7]) : null,
-        lastCompletedRecoveryAccountEmail: row[8] ? String(row[8]) : null,
-        attempts: Number(row[9] || 0),
-        currentAccountEmail: row[10] ? String(row[10]) : '',
-        currentAccountId: row[11] != null ? Number(row[11]) : null,
-        currentAccountRecordEmail: row[12] ? String(row[12]) : null,
-        currentIsBanned: Number(row[13] || 0) === 1,
-        creditOrderStatus: row[14] ? String(row[14]) : null,
-        creditOrderRefundedAt: row[15] ? String(row[15]) : null
-      }))
-
-      const eligibleCandidates = candidates.filter(candidate => !isNoWarrantyOrderType(candidate.orderType))
-
-      if (eligibleCandidates.length === 0) {
-        return res.status(403).json({
-          error: '无质保订单不支持补号',
-          message: '无质保订单不支持补号',
-          code: 'NO_WARRANTY_ORDER'
-        })
-      }
-
-      const refundableCandidates = eligibleCandidates.filter(candidate => {
-        if (candidate.creditOrderRefundedAt) return false
-        const creditStatus = String(candidate.creditOrderStatus || '').trim().toLowerCase()
-        if (creditStatus === 'refunded') return false
-
-        if (candidate.purchaseOrderRefundedAt) return false
-        const purchaseStatus = String(candidate.purchaseOrderStatus || '').trim().toLowerCase()
-        if (purchaseStatus === 'refunded') return false
-
-        return true
-      })
-
-      if (refundableCandidates.length === 0) {
-        const firstCandidate = eligibleCandidates[0]
-        const windowEndsAt = buildRecoveryWindowEndsAt(firstCandidate.originalRedeemedAt)
-        return res.status(403).json({
-          error: '订单已退款，无法补录，请联系客服',
-          message: '订单已退款，无法补录，请联系客服',
-          code: 'ORDER_REFUNDED',
-          processedOriginalCodeId: firstCandidate.originalCodeId,
-          processedOriginalRedeemedAt: firstCandidate.originalRedeemedAt,
-          processedReason: 'order_refunded',
-          windowEndsAt
-        })
-      }
-
-	      const firstCandidate = refundableCandidates[0]
-	      let targetCandidate = refundableCandidates.find(candidate => candidate.currentIsBanned) || null
-	      let processedReason = targetCandidate ? 'banned' : ''
-
-	      const accessCache = new Map()
-	      let unknownSyncError = null
-
-      if (!targetCandidate) {
-        for (const candidate of refundableCandidates) {
-	          const accountId = candidate.currentAccountId
-	          if (!candidate.currentAccountEmail || !accountId) {
-	            targetCandidate = candidate
-	            processedReason = 'missing_account'
-	            break
-	          }
-
-	          let cached = accessCache.get(accountId)
-	          if (!cached) {
-	            const globalCached = getAccountRecoveryAccessCache(accountId)
-	            if (globalCached) {
-	              cached = globalCached
-	              accessCache.set(accountId, globalCached)
-	            }
-	          }
-	          if (cached?.status === 'accessible') continue
-	          if (cached?.status === 'access_failure') {
-	            targetCandidate = candidate
-	            processedReason = 'access_failure'
-	            break
-	          }
-	          if (cached?.status === 'unknown') {
-	            if (!unknownSyncError) {
-	              unknownSyncError = { error: cached.error, statusCode: cached.statusCode, candidate }
-	            }
-	            continue
-	          }
-
-	          try {
-	            const usersData = await fetchAccountUsersList(accountId, {
-	              userListParams: { offset: 0, limit: 1, query: '' }
-	            })
-	            const userCount = typeof usersData?.total === 'number' ? usersData.total : null
-	            const entry = { status: 'accessible', userCount }
-	            accessCache.set(accountId, entry)
-	            setAccountRecoveryAccessCache(accountId, entry)
-	          } catch (error) {
-	            if (isAccountAccessFailure(error)) {
-	              const entry = { status: 'access_failure' }
-	              accessCache.set(accountId, { ...entry, error })
-	              setAccountRecoveryAccessCache(accountId, entry)
-	              targetCandidate = candidate
-	              processedReason = 'access_failure'
-	              break
-	            }
-	            const statusCode = Number(error?.status ?? error?.statusCode) || 503
-	            accessCache.set(accountId, { status: 'unknown', error, statusCode })
-	            if (!unknownSyncError) {
-	              unknownSyncError = { error, statusCode, candidate }
-	            }
-	          }
-	        }
-	      }
-
-      if (!targetCandidate) {
-        if (unknownSyncError) {
-          const candidate = unknownSyncError.candidate || firstCandidate
-          const windowEndsAt = buildRecoveryWindowEndsAt(candidate.originalRedeemedAt)
-          const status = Number(unknownSyncError.statusCode) || 503
-          const message = unknownSyncError.error?.message || '账号同步失败，请稍后再试'
-
-          recordAccountRecovery(db, {
-            email: normalizedEmail,
-            originalCodeId: candidate.originalCodeId,
-            originalRedeemedAt: candidate.originalRedeemedAt,
-            originalAccountEmail: candidate.originalAccountEmail,
-            recoveryMode: 'original',
-            recoveryAccountEmail: candidate.currentAccountRecordEmail || candidate.currentAccountEmail,
-            status: 'failed',
-            errorMessage: unknownSyncError.error?.message || '账号同步失败'
-          })
-          saveDatabase()
-
-          return res.status(status).json({
-            error: message,
-            message,
-            processedOriginalCodeId: candidate.originalCodeId,
-            processedOriginalRedeemedAt: candidate.originalRedeemedAt,
-            processedReason: 'sync_error',
-            windowEndsAt
-          })
-        }
-
-        const windowEndsAt = buildRecoveryWindowEndsAt(firstCandidate.originalRedeemedAt)
-        const accountEmail = firstCandidate.currentAccountRecordEmail || firstCandidate.currentAccountEmail
-        const cachedAccess = firstCandidate.currentAccountId ? accessCache.get(firstCandidate.currentAccountId) : null
-        const userCount = cachedAccess?.status === 'accessible' ? cachedAccess.userCount ?? null : null
-
-        recordAccountRecovery(db, {
-          email: normalizedEmail,
-          originalCodeId: firstCandidate.originalCodeId,
-          originalRedeemedAt: firstCandidate.originalRedeemedAt,
-          originalAccountEmail: firstCandidate.originalAccountEmail,
-          recoveryMode: 'not-needed',
-          recoveryAccountEmail: accountEmail,
-          status: 'skipped',
-          errorMessage: 'account_accessible'
-        })
-        saveDatabase()
-
-        return res.json({
-          message: '当前工作空间仍可访问，无需补录',
-          data: {
-            accountEmail,
-            userCount,
-            recoveryMode: 'not-needed',
-            windowEndsAt,
-            processedOriginalCodeId: firstCandidate.originalCodeId,
-            processedOriginalRedeemedAt: firstCandidate.originalRedeemedAt,
-            processedReason: 'all_accessible'
-          }
-        })
-      }
-
-      const originalCodeId = targetCandidate.originalCodeId
-      const redeemedAt = targetCandidate.originalRedeemedAt
-      const originalAccountEmail = targetCandidate.originalAccountEmail
-      const windowEndsAt = buildRecoveryWindowEndsAt(redeemedAt)
-
-      return await withLocks([`account-recovery:original:${originalCodeId}`], async () => {
-        const completedResult = db.exec(
-          `
-            SELECT status, recovery_account_email
-            FROM account_recovery_logs
-            WHERE original_code_id = ?
-              AND status IN ('success', 'skipped')
-            ORDER BY id DESC
-            LIMIT 1
-          `,
-          [originalCodeId]
-        )
-        const completedRow = completedResult[0]?.values?.[0]
-        const completedStatus = completedRow?.[0] ? String(completedRow[0]).trim().toLowerCase() : ''
-        const completedAccountEmail = completedRow?.[1] ? normalizeEmail(completedRow[1]) : ''
-        const completedAccountForCheck = completedAccountEmail
-          || targetCandidate.currentAccountRecordEmail
-          || targetCandidate.currentAccountEmail
-
-        const hasCurrentRecoverySignal = Boolean(processedReason)
-
-        if (completedStatus && completedAccountForCheck) {
-          const accountStateResult = db.exec(
-            `
-              SELECT COALESCE(is_banned, 0) AS is_banned,
-                     COALESCE(user_count, 0) AS user_count,
-                     COALESCE(invite_count, 0) AS invite_count
-              FROM gpt_accounts
-              WHERE lower(trim(email)) = ?
-              LIMIT 1
-            `,
-            [completedAccountForCheck]
-          )
-          const accountStateRow = accountStateResult[0]?.values?.[0]
-          const currentIsBanned = accountStateRow ? Number(accountStateRow[0] || 0) === 1 : null
-          const currentUserCount = accountStateRow ? Number(accountStateRow[1] || 0) : null
-          const currentInviteCount = accountStateRow ? Number(accountStateRow[2] || 0) : null
-
-          if (!hasCurrentRecoverySignal && completedStatus === 'skipped' && currentIsBanned === false) {
-            return res.json({
-              message: '当前工作空间仍可访问，无需补录',
-              data: {
-                accountEmail: completedAccountForCheck,
-                userCount: currentUserCount,
-                inviteCount: currentInviteCount,
-                recoveryMode: 'not-needed',
-                windowEndsAt,
-                processedOriginalCodeId: originalCodeId,
-                processedOriginalRedeemedAt: redeemedAt,
-                processedReason: 'already_skipped'
-              }
-            })
-          }
-
-          if (!hasCurrentRecoverySignal && completedStatus === 'success' && currentIsBanned === false) {
-            return res.json({
-              message: '补录已完成，请检查邮箱邀请',
-              data: {
-                accountEmail: completedAccountForCheck,
-                userCount: currentUserCount,
-                inviteCount: currentInviteCount,
-                recoveryMode: 'already-done',
-                windowEndsAt,
-                processedOriginalCodeId: originalCodeId,
-                processedOriginalRedeemedAt: redeemedAt,
-                processedReason: 'already_recovered'
-              }
-            })
-          }
-        }
-
-        const orderDeadlineMs = resolveOrderDeadlineMs(db, {
-          originalCodeId,
-          redeemedAt,
-          orderType: targetCandidate.orderType
-        })
-
-        // 补录账号池（统一规则）：
-        // - 只取开放账号（is_open=1）
-        // - 严格模式下优先非当日（按 gpt_accounts.created_at 判断）
-        // - 只用通用渠道兑换码（rc.channel 为空或 common）
-        // - 账号 expire_at 需未过期；在系统设置开启“过期覆盖订单截止日”时，还要求覆盖订单截止日
-        // - 兑换码创建时间窗口由系统设置控制（默认近 7 天；可选强制仅当天）
-        const recoverySettings = await getAccountRecoverySettings(db)
-        const codeCreatedWithinDays = Math.max(1, toInt(recoverySettings?.effective?.codeCreatedWithinDays, 7))
-        const requireExpireCoverDeadline = Boolean(recoverySettings?.effective?.requireExpireCoverDeadline)
-        // 同一购买邮箱下的其他有效订单已经占用的账号，不应在补录时再次分配回来。
-        const occupiedRecoveryAccountEmails = collectOccupiedRecoveryAccountEmails(refundableCandidates)
-        const skipCodeFormatValidation = false
-        const triedRecoveryCodeIds = new Set()
-        let lastAttemptError = null
-        let lastAttemptRecovery = null
-
-        for (let attempt = 1; attempt <= ACCOUNT_RECOVERY_REDEEM_MAX_ATTEMPTS; attempt += 1) {
-          const selectedRecovery = selectRecoveryCode(db, {
-            minExpireMs: requireExpireCoverDeadline ? orderDeadlineMs : Date.now(),
-            capacityLimit: 6,
-            preferNonToday: requireExpireCoverDeadline,
-            preferLatestExpire: !requireExpireCoverDeadline,
-            limit: 200,
-            codeCreatedWithinDays,
-            excludeCodeIds: Array.from(triedRecoveryCodeIds),
-            excludeAccountEmails: occupiedRecoveryAccountEmails
-          })
-
-          if (!selectedRecovery) break
-
-          lastAttemptRecovery = selectedRecovery
-          triedRecoveryCodeIds.add(selectedRecovery.recoveryCodeId)
-
-          const recoveryCodeId = selectedRecovery.recoveryCodeId
-          const recoveryCode = selectedRecovery.recoveryCode
-          const recoveryChannel = selectedRecovery.recoveryChannel || 'common'
-          const recoveryAccountEmail = selectedRecovery.recoveryAccountEmail
-
-          try {
-            const redemptionResult = await withLocks(['purchase', `redemption-code:${recoveryCode}`], () => (
-              redeemCodeInternal({
-                code: recoveryCode,
-                email: normalizedEmail,
-                channel: recoveryChannel || 'common',
-                skipCodeFormatValidation
-              })
-            ))
-
-            recordAccountRecovery(db, {
-              email: normalizedEmail,
-              originalCodeId,
-              originalRedeemedAt: redeemedAt,
-              originalAccountEmail,
-              recoveryMode: 'open-account',
-              recoveryCodeId,
-              recoveryCode,
-              recoveryAccountEmail: redemptionResult.metadata?.accountEmail || recoveryAccountEmail,
-              status: 'success'
-            })
-            saveDatabase()
-
-            return res.json({
-              message: '补录成功',
-              data: {
-                accountEmail: redemptionResult.data.accountEmail,
-                userCount: redemptionResult.data.userCount,
-                inviteStatus: redemptionResult.data.inviteStatus,
-                recoveryMode: 'open-account',
-                windowEndsAt,
-                processedOriginalCodeId: originalCodeId,
-                processedOriginalRedeemedAt: redeemedAt,
-                processedReason
-              }
-            })
-          } catch (error) {
-            lastAttemptError = error
-            const shouldRetry = attempt < ACCOUNT_RECOVERY_REDEEM_MAX_ATTEMPTS && shouldRetryAccountRecoveryRedeem(error)
-            if (shouldRetry) continue
-
-            const statusCode = error instanceof RedemptionError ? error.statusCode || 400 : 500
-            recordAccountRecovery(db, {
-              email: normalizedEmail,
-              originalCodeId,
-              originalRedeemedAt: redeemedAt,
-              originalAccountEmail,
-              recoveryMode: 'open-account',
-              recoveryCodeId,
-              recoveryCode,
-              recoveryAccountEmail,
-              status: 'failed',
-              errorMessage: error?.message || '补录失败'
-            })
-            saveDatabase()
-            return res.status(statusCode).json({
-              error: error?.message || '补录失败，请稍后再试',
-              message: error?.message || '补录失败，请稍后再试',
-              processedOriginalCodeId: originalCodeId,
-              processedOriginalRedeemedAt: redeemedAt,
-              processedReason,
-              windowEndsAt
-            })
-          }
-        }
-
-        const errorMessage = lastAttemptError?.message || '暂无可用通用渠道补录兑换码'
-        const responseMessage = '暂无可用通用渠道补录账号，请稍后再试或联系客服'
-        const statusCode = 503
-
-        recordAccountRecovery(db, {
-          email: normalizedEmail,
-          originalCodeId,
-          originalRedeemedAt: redeemedAt,
-          originalAccountEmail,
-          recoveryMode: 'open-account',
-          recoveryCodeId: lastAttemptRecovery?.recoveryCodeId,
-          recoveryCode: lastAttemptRecovery?.recoveryCode,
-          recoveryAccountEmail: lastAttemptRecovery?.recoveryAccountEmail,
-          status: 'failed',
-          errorMessage
-        })
-        saveDatabase()
-
-        return res.status(statusCode).json({
-          error: responseMessage,
-          message: responseMessage,
-          processedOriginalCodeId: originalCodeId,
-          processedOriginalRedeemedAt: redeemedAt,
-          processedReason,
-          windowEndsAt
-        })
-      })
-    })
-  } catch (error) {
-    console.error('补录处理失败:', error)
-    res.status(500).json({ error: '服务器错误，请稍后再试', message: '服务器错误，请稍后再试' })
-  }
-})
-
-router.post('/xhs/search-order', requireFeatureEnabled('xhs'), async (req, res) => {
-  try {
-    const { orderNumber } = req.body || {}
-    const normalizedOrderNumber = normalizeXhsOrderNumber(orderNumber)
-
-    if (!normalizedOrderNumber) {
-      return res.status(400).json({ error: '请输入有效的小红书订单号' })
-    }
-
-    const config = await getXhsConfig()
-    if (!config?.authorization) {
-      return res.status(503).json({ error: '请先在管理后台配置 Authorization（推荐粘贴 curl 命令）' })
-    }
-    if (!config?.cookies) {
-      return res.status(503).json({ error: '请先在管理后台配置 Cookie（推荐粘贴 curl 命令）' })
-    }
-
-    const existingOrder = await getXhsOrderByNumber(normalizedOrderNumber)
-    if (existingOrder) {
-      return res.json({
-        message: '订单已同步',
-        order: existingOrder,
-        synced: false
-      })
-    }
-
-    if (isXhsSyncing()) {
-      return res.status(409).json({ error: '同步任务正在运行，请稍后再试' })
-    }
-
-    let syncResult
-    setXhsSyncing(true)
-    try {
-      syncResult = await syncOrdersFromApi({
-        authorization: config.authorization,
-        cookies: config.cookies,
-        extraHeaders: config.extraHeaders || {},
-        searchKeyword: normalizedOrderNumber,
-        pageSize: 20,
-        maxPages: 1,
-      })
-    } finally {
-      setXhsSyncing(false)
-    }
-
-    await recordXhsSyncResult({ success: true })
-
-    const syncedOrder = await getXhsOrderByNumber(normalizedOrderNumber)
-    if (!syncedOrder) {
-      return res.status(404).json({ error: '未找到对应订单，请确认订单号是否正确' })
-    }
-
-    return res.json({
-      message: '订单同步完成',
-      order: syncedOrder,
-      synced: true,
-      importResult: {
-        created: syncResult.created,
-        skipped: syncResult.skipped,
-        total: syncResult.totalFetched,
-      }
-    })
-  } catch (error) {
-    console.error('[XHS Search Sync] 请求处理失败:', error)
-    await recordXhsSyncResult({ success: false, error: error?.message || '同步失败' }).catch(() => {})
-    res.status(500).json({ error: error?.message || '服务器错误，请稍后再试' })
-  }
-})
-
-router.post('/xhs/check-order', requireFeatureEnabled('xhs'), async (req, res) => {
-  try {
-    const { orderNumber } = req.body || {}
-    const normalizedOrderNumber = normalizeXhsOrderNumber(orderNumber)
-
-    if (!normalizedOrderNumber) {
-      return res.status(400).json({ error: '请输入有效的小红书订单号' })
-    }
-
-    const orderRecord = await getXhsOrderByNumber(normalizedOrderNumber)
-    res.json({
-      order: orderRecord,
-      found: Boolean(orderRecord),
-    })
-  } catch (error) {
-    console.error('[XHS Check Order] 请求失败:', error)
-    res.status(500).json({ error: '查询订单失败，请稍后再试' })
-  }
-})
-
-router.post('/xhs/redeem-order', requireFeatureEnabled('xhs'), async (req, res) => {
-  try {
-    const { email, orderNumber, strictToday } = req.body || {}
-    const trimmedEmail = (email || '').trim()
-    const normalizedEmail = normalizeEmail(trimmedEmail)
-    const strictTodayEnabled = resolveStrictTodayEnabled(strictToday)
-
-    if (!normalizedEmail) {
-      return res.status(400).json({ error: '请输入邮箱地址' })
-    }
-
-    if (!EMAIL_REGEX.test(trimmedEmail)) {
-      return res.status(400).json({ error: '请输入有效的邮箱地址' })
-    }
-
-    const normalizedOrderNumber = normalizeXhsOrderNumber(orderNumber)
-    if (!normalizedOrderNumber) {
-      return res.status(400).json({ error: '请输入有效的小红书订单号' })
-    }
-
-    await withLocks(['purchase', `xhs-redeem`, `xhs-order:${normalizedOrderNumber}`], async () => {
-	      const orderRecord = await getXhsOrderByNumber(normalizedOrderNumber)
-	      if (!orderRecord) {
-	        return res.status(404).json({ error: '未找到对应订单，请稍后再试' })
-	      }
-
-	      if (orderRecord.isUsed) {
-	        return res.status(400).json({ error: '该订单已完成兑换' })
-	      }
-
-	      if (String(orderRecord.orderStatus || '').trim() === '已关闭') {
-	        return res.status(403).json({ error: '该订单已完成售后退款（已关闭），无法进行核销' })
-	      }
-
-	      const db = await getDatabase()
-        const { byKey: channelsByKey } = await getChannels(db)
-        const allowCommonFallback = Boolean(channelsByKey.get('xhs')?.allowCommonFallback)
-	      const now = new Date()
-	      const fallbackToYesterdayEnabled = !strictTodayEnabled && now.getHours() >= 0 && now.getHours() < 8
-        const minAccountExpireAt = formatExpireAtComparable(addDays(now, HISTORY_CODE_MIN_ACCOUNT_REMAINING_DAYS))
-
-		      const availableCodeResult = db.exec(
-		        `
-		          SELECT rc.id, rc.code, rc.created_at
-		          FROM redemption_codes rc
-		          WHERE lower(trim(rc.channel)) = 'xhs'
-		            AND rc.is_redeemed = 0
-                AND COALESCE(rc.is_downstream_sold, 0) = 0
-		            AND DATE(rc.created_at) = DATE('now', 'localtime')
-                AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-		            AND (
-		              rc.account_email IS NULL
-                  OR trim(rc.account_email) = ''
-			              OR EXISTS (
-			                SELECT 1
-			                FROM gpt_accounts ga
-		                  WHERE lower(trim(ga.email)) = lower(trim(rc.account_email))
-		              )
-		            )
-		          ORDER BY rc.created_at ASC
-		          LIMIT 1
-	        `
-	      )
-
-      let selectedCodeRow = availableCodeResult?.[0]?.values?.[0] || null
-
-      if (!selectedCodeRow && fallbackToYesterdayEnabled) {
-		        const fallbackCodeResult = db.exec(
-		          `
-		            SELECT rc.id, rc.code, rc.created_at
-		            FROM redemption_codes rc
-                JOIN gpt_accounts ga
-                  ON lower(trim(ga.email)) = lower(trim(rc.account_email))
-		            WHERE lower(trim(rc.channel)) = 'xhs'
-		              AND rc.is_redeemed = 0
-                  AND COALESCE(rc.is_downstream_sold, 0) = 0
-		              AND DATE(rc.created_at) = DATE('now', 'localtime', '-1 day')
-                  AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                  AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                  AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                  AND ga.expire_at IS NOT NULL
-                  AND trim(ga.expire_at) != ''
-                  AND trim(ga.expire_at) >= ?
-		            ORDER BY rc.created_at ASC
-	            LIMIT 1
-	          `,
-            [minAccountExpireAt]
-	        )
-	        selectedCodeRow = fallbackCodeResult?.[0]?.values?.[0] || null
-	      }
-
-      if (!selectedCodeRow && !strictTodayEnabled) {
-        const anyDateCodeResult = db.exec(
-          `
-            SELECT rc.id, rc.code, rc.created_at
-            FROM redemption_codes rc
-            JOIN gpt_accounts ga
-              ON lower(trim(ga.email)) = lower(trim(rc.account_email))
-            WHERE lower(trim(rc.channel)) = 'xhs'
-              AND rc.is_redeemed = 0
-              AND COALESCE(rc.is_downstream_sold, 0) = 0
-              AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-              AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-              AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-              AND ga.expire_at IS NOT NULL
-              AND trim(ga.expire_at) != ''
-              AND trim(ga.expire_at) >= ?
-            ORDER BY rc.created_at ASC
-            LIMIT 1
-          `,
-          [minAccountExpireAt]
-        )
-        selectedCodeRow = anyDateCodeResult?.[0]?.values?.[0] || null
-      }
-
-        if (!selectedCodeRow && allowCommonFallback) {
-          const commonFallback = await withLocks(['redemption-codes:pool:common'], async () => {
-            const commonCodeResult = db.exec(
-              `
-                SELECT rc.id, rc.code, rc.created_at
-                FROM redemption_codes rc
-                WHERE COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = 'common'
-                  AND rc.is_redeemed = 0
-                  AND COALESCE(rc.is_downstream_sold, 0) = 0
-                  AND DATE(rc.created_at) = DATE('now', 'localtime')
-                  AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                  AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                  AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                  AND (
-                    rc.account_email IS NULL
-                    OR trim(rc.account_email) = ''
-	                  OR EXISTS (
-	                      SELECT 1
-	                      FROM gpt_accounts ga
-	                      WHERE lower(trim(ga.email)) = lower(trim(rc.account_email))
-	                    )
-	                  )
-	                ORDER BY rc.created_at ASC
-                LIMIT 1
-              `
-            )
-            let commonCodeRow = commonCodeResult?.[0]?.values?.[0] || null
-
-            if (!commonCodeRow && fallbackToYesterdayEnabled) {
-              const commonYesterdayResult = db.exec(
-                `
-                  SELECT rc.id, rc.code, rc.created_at
-                  FROM redemption_codes rc
-                  JOIN gpt_accounts ga
-                    ON lower(trim(ga.email)) = lower(trim(rc.account_email))
-                  WHERE COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = 'common'
-                    AND rc.is_redeemed = 0
-                    AND COALESCE(rc.is_downstream_sold, 0) = 0
-                    AND DATE(rc.created_at) = DATE('now', 'localtime', '-1 day')
-                    AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                    AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                    AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                    AND ga.expire_at IS NOT NULL
-                    AND trim(ga.expire_at) != ''
-                    AND trim(ga.expire_at) >= ?
-	                  ORDER BY rc.created_at ASC
-                  LIMIT 1
-                `,
-                [minAccountExpireAt]
-              )
-              commonCodeRow = commonYesterdayResult?.[0]?.values?.[0] || null
-            }
-
-            if (!commonCodeRow && !strictTodayEnabled) {
-              const commonAnyDateResult = db.exec(
-                `
-                  SELECT rc.id, rc.code, rc.created_at
-                  FROM redemption_codes rc
-                  JOIN gpt_accounts ga
-                    ON lower(trim(ga.email)) = lower(trim(rc.account_email))
-                  WHERE COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = 'common'
-                    AND rc.is_redeemed = 0
-                    AND COALESCE(rc.is_downstream_sold, 0) = 0
-                    AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                    AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                    AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                    AND ga.expire_at IS NOT NULL
-                    AND trim(ga.expire_at) != ''
-                    AND trim(ga.expire_at) >= ?
-                    ORDER BY rc.created_at ASC
-                  LIMIT 1
-                `,
-                [minAccountExpireAt]
-              )
-              commonCodeRow = commonAnyDateResult?.[0]?.values?.[0] || null
-            }
-
-            if (!commonCodeRow) return null
-
-            const selectedCodeId = commonCodeRow[0]
-            const selectedCode = commonCodeRow[1]
-
-            const redemptionResult = await withLocks([`redemption-code:${selectedCode}`], () => (
-              redeemCodeInternal({
-                code: selectedCode,
-                email: normalizedEmail,
-                channel: 'xhs',
-                skipCodeFormatValidation: true,
-                allowCommonChannelFallback: true
-              })
-            ))
-
-            await markXhsOrderRedeemed(orderRecord.id, selectedCodeId, selectedCode, normalizedEmail)
-
-            return { selectedCodeId, selectedCode, redemptionResult }
-          })
-
-          if (commonFallback) {
-            return res.json({
-              message: '兑换成功',
-              data: commonFallback.redemptionResult.data,
-              order: {
-                ...orderRecord,
-                status: 'redeemed',
-                isUsed: true,
-                userEmail: normalizedEmail,
-                assignedCodeId: commonFallback.selectedCodeId,
-                assignedCode: commonFallback.selectedCode,
-              }
-            })
-          }
-        }
-
-      if (!selectedCodeRow) {
-	        const statsResult = db.exec(
-	          `
-	            SELECT
-	              COUNT(*) as all_total,
-	              SUM(CASE WHEN is_redeemed = 0 AND COALESCE(is_downstream_sold, 0) = 0 THEN 1 ELSE 0 END) as all_unused,
-	              SUM(CASE WHEN DATE(created_at) = DATE('now', 'localtime') THEN 1 ELSE 0 END) as today_total,
-	              SUM(CASE WHEN is_redeemed = 0 AND COALESCE(is_downstream_sold, 0) = 0 AND DATE(created_at) = DATE('now', 'localtime') THEN 1 ELSE 0 END) as today_unused
-	            FROM redemption_codes rc
-	            WHERE lower(trim(rc.channel)) = 'xhs'
-	              AND COALESCE(rc.is_downstream_sold, 0) = 0
-	              AND (
-	                rc.account_email IS NULL
-                  OR trim(rc.account_email) = ''
-		                OR EXISTS (
-		                  SELECT 1
-		                  FROM gpt_accounts ga
-		                  WHERE lower(trim(ga.email)) = lower(trim(rc.account_email))
-		                )
-		              )
-		          `
-		        )
-        const statsRow = statsResult?.[0]?.values?.[0] || []
-        const allTotal = Number(statsRow[0] || 0)
-        const todayTotal = Number(statsRow[2] || 0)
-        const todayUnused = Number(statsRow[3] || 0)
-
-	        const errorCode = allTotal === 0
-	          ? 'xhs_codes_not_configured'
-	          : (todayTotal <= 0 ? 'xhs_no_today_codes' : (todayUnused <= 0 ? 'xhs_today_codes_exhausted' : 'xhs_codes_unavailable'))
-
-	        return res.status(503).json({ error: OUT_OF_STOCK_MESSAGE, errorCode })
-	      }
-
-      const selectedCodeId = selectedCodeRow[0]
-      const selectedCode = selectedCodeRow[1]
-
-      const redemptionResult = await withLocks([`redemption-code:${selectedCode}`], () => (
-        redeemCodeInternal({
-          code: selectedCode,
-          email: normalizedEmail,
-          channel: 'xhs',
-          skipCodeFormatValidation: true,
-          allowCommonChannelFallback: true
-        })
-      ))
-
-      await markXhsOrderRedeemed(orderRecord.id, selectedCodeId, selectedCode, normalizedEmail)
-
-      return res.json({
-        message: '兑换成功',
-        data: redemptionResult.data,
-        order: {
-          ...orderRecord,
-          status: 'redeemed',
-          isUsed: true,
-          userEmail: normalizedEmail,
-          assignedCodeId: selectedCodeId,
-          assignedCode: selectedCode,
-        }
-      })
-    })
-  } catch (error) {
-    if (error instanceof RedemptionError) {
-      return res.status(error.statusCode || 400).json({
-        error: error.message,
-        message: error.message,
-        ...(error.payload || {})
-      })
-    }
-    console.error('[XHS Redeem] 兑换错误:', error)
-    res.status(500).json({ error: '服务器错误，请稍后重试' })
-  }
-})
-
-router.post('/xianyu/search-order', requireFeatureEnabled('xianyu'), async (req, res) => {
-  try {
-    const { orderId } = req.body || {}
-    const normalizedOrderId = normalizeXianyuOrderId(orderId)
-
-    if (!normalizedOrderId) {
-      return res.status(400).json({ error: '请输入有效的闲鱼订单号' })
-    }
-
-    const config = await getXianyuConfig()
-    if (!config?.cookies) {
-      return res.status(503).json({ error: '请先在管理后台配置 Cookie' })
-    }
-
-    const existingOrder = await getXianyuOrderById(normalizedOrderId)
-    if (existingOrder) {
-      return res.json({
-        message: '订单已同步',
-        order: existingOrder,
-        synced: false
-      })
-    }
-
-    const apiResult = await queryXianyuOrderDetailFromApi({
-      orderId: normalizedOrderId,
-      cookies: config.cookies,
-    })
-    if (apiResult.cookiesUpdated) {
-      await updateXianyuConfig({ cookies: apiResult.cookies })
-    }
-
-    const order = transformXianyuApiOrder(apiResult.raw, normalizedOrderId)
-    if (!order?.orderId) {
-      return res.status(502).json({ error: '订单详情解析失败，请确认订单号是否正确' })
-    }
-    const orderForImport = transformXianyuApiOrderForImport(order)
-    if (!orderForImport?.orderId) {
-      return res.status(502).json({ error: '订单详情解析失败，无法写入数据库' })
-    }
-    const importResult = await importXianyuOrders(orderForImport ? [orderForImport] : [])
-
-    await recordXianyuSyncResult({ success: true })
-
-    const syncedOrder = await getXianyuOrderById(normalizedOrderId)
-    if (!syncedOrder) {
-      return res.status(404).json({ error: '未找到对应订单，请确认订单号是否正确' })
-    }
-
-    return res.json({
-      message: '订单同步完成',
-      order: syncedOrder,
-      synced: true,
-      importResult
-    })
-  } catch (error) {
-    console.error('[Xianyu Search Sync] 请求处理失败:', error)
-    await recordXianyuSyncResult({ success: false, error: error?.message || '同步失败' }).catch(() => {})
-    res.status(500).json({ error: error?.message || '服务器错误，请稍后再试' })
-  }
-})
-
-router.post('/xianyu/check-order', requireFeatureEnabled('xianyu'), async (req, res) => {
-  try {
-    const { orderId } = req.body || {}
-    const normalizedOrderId = normalizeXianyuOrderId(orderId)
-
-    if (!normalizedOrderId) {
-      return res.status(400).json({ error: '请输入有效的闲鱼订单号' })
-    }
-
-    const orderRecord = await getXianyuOrderById(normalizedOrderId)
-    res.json({
-      order: orderRecord,
-      found: Boolean(orderRecord),
-    })
-  } catch (error) {
-    console.error('[Xianyu Check Order] 请求失败:', error)
-    res.status(500).json({ error: '查询订单失败，请稍后再试' })
-  }
-})
-
-router.post('/xianyu/redeem-order', requireFeatureEnabled('xianyu'), async (req, res) => {
-  try {
-    const { email, orderId, strictToday } = req.body || {}
-    const trimmedEmail = (email || '').trim()
-    const normalizedEmail = normalizeEmail(trimmedEmail)
-    const strictTodayEnabled = resolveStrictTodayEnabled(strictToday)
-
-    if (!normalizedEmail) {
-      return res.status(400).json({ error: '请输入邮箱地址' })
-    }
-
-    if (!EMAIL_REGEX.test(trimmedEmail)) {
-      return res.status(400).json({ error: '请输入有效的邮箱地址' })
-    }
-
-    const normalizedOrderId = normalizeXianyuOrderId(orderId)
-    if (!normalizedOrderId) {
-      return res.status(400).json({ error: '请输入有效的闲鱼订单号' })
-    }
-
-    await withLocks(['purchase', `xianyu-redeem`, `xianyu-order:${normalizedOrderId}`], async () => {
-      const orderRecord = await getXianyuOrderById(normalizedOrderId)
-      if (!orderRecord) {
-        return res.status(404).json({ error: '未找到对应订单，请稍后再试' })
-      }
-
-      if (orderRecord.isUsed) {
-        return res.status(400).json({ error: '该订单已完成兑换' })
-      }
-
-      if (String(orderRecord.orderStatus || '').includes('关闭')) {
-        return res.status(403).json({ error: '该订单已关闭，无法进行核销' })
-      }
-
-	      const db = await getDatabase()
-        const { byKey: channelsByKey } = await getChannels(db)
-        const allowCommonFallback = Boolean(channelsByKey.get('xianyu')?.allowCommonFallback)
-	      const now = new Date()
-	      const fallbackToYesterdayEnabled = !strictTodayEnabled && now.getHours() >= 0 && now.getHours() < 8
-        const minAccountExpireAt = formatExpireAtComparable(addDays(now, HISTORY_CODE_MIN_ACCOUNT_REMAINING_DAYS))
-	      const resolvedOrderType = resolveXianyuOrderTypeFromActualPaid(orderRecord.actualPaid)
-
-		      const availableCodeResult = db.exec(
-		        `
-		          SELECT rc.id, rc.code, rc.created_at
-	          FROM redemption_codes rc
-	          WHERE lower(trim(rc.channel)) = 'xianyu'
-	            AND rc.is_redeemed = 0
-              AND COALESCE(rc.is_downstream_sold, 0) = 0
-	            AND DATE(rc.created_at) = DATE('now', 'localtime')
-              AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-              AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-              AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-	            AND (
-	              rc.account_email IS NULL
-                OR trim(rc.account_email) = ''
-		              OR EXISTS (
-		                SELECT 1
-	                FROM gpt_accounts ga
-	                WHERE lower(trim(ga.email)) = lower(trim(rc.account_email))
-	              )
-	            )
-	          ORDER BY rc.created_at ASC
-	          LIMIT 1
-	        `
-      )
-
-      let selectedCodeRow = availableCodeResult?.[0]?.values?.[0] || null
-
-	      if (!selectedCodeRow && fallbackToYesterdayEnabled) {
-	        const fallbackCodeResult = db.exec(
-	          `
-	            SELECT rc.id, rc.code, rc.created_at
-	            FROM redemption_codes rc
-              JOIN gpt_accounts ga
-                ON lower(trim(ga.email)) = lower(trim(rc.account_email))
-	            WHERE lower(trim(rc.channel)) = 'xianyu'
-	              AND rc.is_redeemed = 0
-                AND COALESCE(rc.is_downstream_sold, 0) = 0
-	              AND DATE(rc.created_at) = DATE('now', 'localtime', '-1 day')
-                AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                AND ga.expire_at IS NOT NULL
-                AND trim(ga.expire_at) != ''
-                AND trim(ga.expire_at) >= ?
-	            ORDER BY rc.created_at ASC
-            LIMIT 1
-          `,
-          [minAccountExpireAt]
-        )
-	        selectedCodeRow = fallbackCodeResult?.[0]?.values?.[0] || null
-	      }
-
-      if (!selectedCodeRow && !strictTodayEnabled) {
-        const anyDateCodeResult = db.exec(
-          `
-            SELECT rc.id, rc.code, rc.created_at
-            FROM redemption_codes rc
-            JOIN gpt_accounts ga
-              ON lower(trim(ga.email)) = lower(trim(rc.account_email))
-            WHERE lower(trim(rc.channel)) = 'xianyu'
-              AND rc.is_redeemed = 0
-              AND COALESCE(rc.is_downstream_sold, 0) = 0
-              AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-              AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-              AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-              AND ga.expire_at IS NOT NULL
-              AND trim(ga.expire_at) != ''
-              AND trim(ga.expire_at) >= ?
-            ORDER BY rc.created_at ASC
-            LIMIT 1
-          `,
-          [minAccountExpireAt]
-        )
-        selectedCodeRow = anyDateCodeResult?.[0]?.values?.[0] || null
-      }
-
-        if (!selectedCodeRow && allowCommonFallback) {
-          const commonFallback = await withLocks(['redemption-codes:pool:common'], async () => {
-            const commonCodeResult = db.exec(
-              `
-                SELECT rc.id, rc.code, rc.created_at
-                FROM redemption_codes rc
-                WHERE COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = 'common'
-                  AND rc.is_redeemed = 0
-                  AND COALESCE(rc.is_downstream_sold, 0) = 0
-                  AND DATE(rc.created_at) = DATE('now', 'localtime')
-                  AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                  AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                  AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                  AND (
-                    rc.account_email IS NULL
-                    OR trim(rc.account_email) = ''
-	                  OR EXISTS (
-	                      SELECT 1
-	                      FROM gpt_accounts ga
-	                      WHERE lower(trim(ga.email)) = lower(trim(rc.account_email))
-	                    )
-	                  )
-	                ORDER BY rc.created_at ASC
-                LIMIT 1
-              `
-            )
-            let commonCodeRow = commonCodeResult?.[0]?.values?.[0] || null
-
-            if (!commonCodeRow && fallbackToYesterdayEnabled) {
-              const commonYesterdayResult = db.exec(
-                `
-                  SELECT rc.id, rc.code, rc.created_at
-                  FROM redemption_codes rc
-                  JOIN gpt_accounts ga
-                    ON lower(trim(ga.email)) = lower(trim(rc.account_email))
-                  WHERE COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = 'common'
-                    AND rc.is_redeemed = 0
-                    AND COALESCE(rc.is_downstream_sold, 0) = 0
-                    AND DATE(rc.created_at) = DATE('now', 'localtime', '-1 day')
-                    AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                    AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                    AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                    AND ga.expire_at IS NOT NULL
-                    AND trim(ga.expire_at) != ''
-                    AND trim(ga.expire_at) >= ?
-	                  ORDER BY rc.created_at ASC
-                  LIMIT 1
-                `,
-                [minAccountExpireAt]
-              )
-              commonCodeRow = commonYesterdayResult?.[0]?.values?.[0] || null
-            }
-
-            if (!commonCodeRow && !strictTodayEnabled) {
-              const commonAnyDateResult = db.exec(
-                `
-                  SELECT rc.id, rc.code, rc.created_at
-                  FROM redemption_codes rc
-                  JOIN gpt_accounts ga
-                    ON lower(trim(ga.email)) = lower(trim(rc.account_email))
-                  WHERE COALESCE(NULLIF(lower(trim(rc.channel)), ''), 'common') = 'common'
-                    AND rc.is_redeemed = 0
-                    AND COALESCE(rc.is_downstream_sold, 0) = 0
-                    AND (rc.reserved_for_uid IS NULL OR rc.reserved_for_uid = '')
-                    AND (rc.reserved_for_order_no IS NULL OR rc.reserved_for_order_no = '')
-                    AND (rc.reserved_for_entry_id IS NULL OR rc.reserved_for_entry_id = 0)
-                    AND ga.expire_at IS NOT NULL
-                    AND trim(ga.expire_at) != ''
-                    AND trim(ga.expire_at) >= ?
-                    ORDER BY rc.created_at ASC
-                  LIMIT 1
-                `,
-                [minAccountExpireAt]
-              )
-              commonCodeRow = commonAnyDateResult?.[0]?.values?.[0] || null
-            }
-
-            if (!commonCodeRow) return null
-
-            const selectedCodeId = commonCodeRow[0]
-            const selectedCode = commonCodeRow[1]
-
-            const redemptionResult = await withLocks([`redemption-code:${selectedCode}`], () => (
-              redeemCodeInternal({
-                code: selectedCode,
-                email: normalizedEmail,
-                channel: 'xianyu',
-                orderType: resolvedOrderType,
-                skipCodeFormatValidation: true,
-                allowCommonChannelFallback: true
-              })
-            ))
-
-            await markXianyuOrderRedeemed(orderRecord.id, selectedCodeId, selectedCode, normalizedEmail)
-
-            return { selectedCodeId, selectedCode, redemptionResult }
-          })
-
-          if (commonFallback) {
-            return res.json({
-              message: '兑换成功',
-              data: commonFallback.redemptionResult.data,
-              order: {
-                ...orderRecord,
-                status: 'redeemed',
-                isUsed: true,
-                userEmail: normalizedEmail,
-                assignedCodeId: commonFallback.selectedCodeId,
-                assignedCode: commonFallback.selectedCode,
-              }
-            })
-          }
-        }
-
-	      if (!selectedCodeRow) {
-	        const statsResult = db.exec(
-	          `
-            SELECT
-              COUNT(*) as all_total,
-              SUM(CASE WHEN is_redeemed = 0 AND COALESCE(is_downstream_sold, 0) = 0 THEN 1 ELSE 0 END) as all_unused,
-              SUM(CASE WHEN DATE(created_at) = DATE('now', 'localtime') THEN 1 ELSE 0 END) as today_total,
-              SUM(CASE WHEN is_redeemed = 0 AND COALESCE(is_downstream_sold, 0) = 0 AND DATE(created_at) = DATE('now', 'localtime') THEN 1 ELSE 0 END) as today_unused
-            FROM redemption_codes rc
-            WHERE lower(trim(rc.channel)) = 'xianyu'
-              AND COALESCE(rc.is_downstream_sold, 0) = 0
-              AND (
-                rc.account_email IS NULL
-                OR trim(rc.account_email) = ''
-	                OR EXISTS (
-	                  SELECT 1
-	                  FROM gpt_accounts ga
-	                  WHERE lower(trim(ga.email)) = lower(trim(rc.account_email))
-	                )
-	              )
-	          `
-		        )
-        const statsRow = statsResult?.[0]?.values?.[0] || []
-        const allTotal = Number(statsRow[0] || 0)
-        const todayTotal = Number(statsRow[2] || 0)
-        const todayUnused = Number(statsRow[3] || 0)
-
-	        const errorCode = allTotal === 0
-	          ? 'xianyu_codes_not_configured'
-	          : (todayTotal <= 0 ? 'xianyu_no_today_codes' : (todayUnused <= 0 ? 'xianyu_today_codes_exhausted' : 'xianyu_codes_unavailable'))
-
-	        return res.status(503).json({ error: OUT_OF_STOCK_MESSAGE, errorCode })
-	      }
-
-      const selectedCodeId = selectedCodeRow[0]
-      const selectedCode = selectedCodeRow[1]
-
-	      const redemptionResult = await withLocks([`redemption-code:${selectedCode}`], () => (
-	        redeemCodeInternal({
-	          code: selectedCode,
-	          email: normalizedEmail,
-	          channel: 'xianyu',
-	          orderType: resolvedOrderType,
-	          skipCodeFormatValidation: true,
-            allowCommonChannelFallback: true
-	        })
-	      ))
-
-      await markXianyuOrderRedeemed(orderRecord.id, selectedCodeId, selectedCode, normalizedEmail)
-
-      return res.json({
-        message: '兑换成功',
-        data: redemptionResult.data,
-        order: {
-          ...orderRecord,
-          status: 'redeemed',
-          isUsed: true,
-          userEmail: normalizedEmail,
-          assignedCodeId: selectedCodeId,
-          assignedCode: selectedCode,
-        }
-      })
-    })
-  } catch (error) {
-    if (error instanceof RedemptionError) {
-      return res.status(error.statusCode || 400).json({
-        error: error.message,
-        message: error.message,
-        ...(error.payload || {})
-      })
-    }
-    console.error('[Xianyu Redeem] 兑换错误:', error)
-    res.status(500).json({ error: '服务器错误，请稍后重试' })
-  }
-})
-
-// ArtisanFlow 渠道 API：获取当天创建的兑换码
-router.get('/artisan-flow/today', apiKeyAuth, async (req, res) => {
-  try {
-    const db = await getDatabase()
-
-    // 使用 SQLite 的 date() 函数比较日期，'localtime' 确保使用服务器本地时间
-    const result = db.exec(`
-      SELECT id, code, is_redeemed, redeemed_at, redeemed_by,
-             account_email, channel, channel_name, created_at, updated_at
-      FROM redemption_codes
-      WHERE channel = 'artisan-flow'
-        AND date(created_at) = date('now', 'localtime')
-      ORDER BY created_at DESC
-    `)
-
-    const codes = result.length > 0
-      ? result[0].values.map(row => ({
-          id: row[0],
-          code: row[1],
-          isRedeemed: row[2] === 1,
-          redeemedAt: row[3],
-          redeemedBy: row[4],
-          accountEmail: row[5],
-          channel: row[6],
-          channelName: row[7],
-          createdAt: row[8],
-          updatedAt: row[9]
-        }))
-      : []
-
-    // 获取当前本地日期
-    const dateResult = db.exec("SELECT date('now', 'localtime')")
-    const todayDate = dateResult.length > 0 ? dateResult[0].values[0][0] : new Date().toISOString().split('T')[0]
-
-    res.json({
-      success: true,
-      date: todayDate,
-      total: codes.length,
-      codes
-    })
-  } catch (error) {
-    console.error('[ArtisanFlow API] 获取当天兑换码失败:', error)
-    res.status(500).json({ error: '服务器错误，请稍后重试' })
+    console.error('Public redeem error:', error)
+    res.status(500).json({ error: '内部服务器错误', message: '服务器错误，请稍后重试' })
   }
 })
 

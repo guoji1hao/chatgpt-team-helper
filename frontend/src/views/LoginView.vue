@@ -93,8 +93,7 @@ const handleLogin = async () => {
           </Button>
 
           <div class="text-center text-sm text-gray-500 font-medium">
-            没有账号？
-            <router-link to="/register" class="text-gray-900 hover:underline">去注册</router-link>
+            如需账号，请联系管理员创建。
           </div>
         </form>
       </div>

@@ -1,493 +1,99 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, computed, onBeforeUnmount, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { authService, configService, redemptionCodeService, gptAccountService, type RedemptionCode, type GptAccount, type PurchaseOrderType, type SyncUserCountResponse, type ChatgptAccountInviteItem, type Channel } from '@/services/api'
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { authService, configService, redemptionCodeService, gptAccountService, type RedemptionCode, type GptAccount, type Channel } from '@/services/api'
 import { formatShanghaiDate } from '@/lib/datetime'
-import { useAppConfigStore } from '@/stores/appConfig'
-import {
-  Card,
-  CardContent,
-  CardFooter,
-} from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
 } from '@/components/ui/dialog'
 import { useToast } from '@/components/ui/toast'
-import { Search, Plus, Download, Upload, Trash2, ChevronLeft, ChevronRight, RefreshCcw, RefreshCw, Ticket, X, AlertTriangle } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, Plus, RefreshCw, Search, Ticket, Trash2 } from 'lucide-vue-next'
 
 const router = useRouter()
-const route = useRoute()
+const { success: showSuccessToast, error: showErrorToast, warning: showWarningToast, info: showInfoToast } = useToast()
+
 const codes = ref<RedemptionCode[]>([])
 const totalCodes = ref(0)
 const accounts = ref<GptAccount[]>([])
-const loading = ref(true)
+const runtimeChannels = ref<Channel[]>([])
+const loading = ref(false)
 const error = ref('')
-const teleportReady = ref(false)
+const searchQuery = ref('')
+const statusFilter = ref<'all' | 'unused' | 'redeemed'>('all')
+const currentPage = ref(1)
+const pageSize = ref(20)
+const totalPages = computed(() => Math.max(1, Math.ceil(totalCodes.value / pageSize.value)))
+
 const showBatchDialog = ref(false)
 const batchCount = ref(10)
 const selectedAccountEmail = ref('')
 const selectedBatchChannel = ref('common')
 const creating = ref(false)
-const selectedCodes = ref<number[]>([])
+
 const showRedeemDialog = ref(false)
 const redeemTargetCode = ref<RedemptionCode | null>(null)
 const redeemEmail = ref('')
-const redeemOrderType = ref<PurchaseOrderType>('warranty')
 const redeeming = ref(false)
-const reinvitingCodeIds = ref<number[]>([])
-const appConfigStore = useAppConfigStore()
-const dateFormatOptions = computed(() => ({
-  timeZone: appConfigStore.timezone,
-  locale: appConfigStore.locale,
-}))
-const showTextPopover = ref(false)
-const popoverText = ref('')
-const popoverPosition = ref({ x: 0, y: 0 })
-const showStatusTooltip = ref(false)
-const statusTooltipText = ref('')
-const statusTooltipPosition = ref({ x: 0, y: 0 })
-const runtimeChannels = ref<Channel[]>([])
-const channelOptions = ref<Array<{ value: string; label: string }>>([
-  { value: 'common', label: '通用渠道' },
-  { value: 'paypal', label: 'PayPal' },
-  { value: 'linux-do', label: 'Linux DO' },
-  { value: 'xhs', label: '小红书' },
-  { value: 'xianyu', label: '闲鱼' },
-  { value: 'artisan-flow', label: 'ArtisanFlow' }
-])
-const channelOptionsMap = computed(() => new Map(channelOptions.value.map(option => [option.value, option.label])))
-const channelConfigsByKey = computed(() => new Map(runtimeChannels.value.map(channel => [channel.key, channel])))
-const batchChannelOptions = computed(() => channelOptions.value.filter(option => channelConfigsByKey.value.get(option.value)?.redeemMode !== 'external-card'))
-const externalImportChannelOptions = computed(() => runtimeChannels.value
-  .filter(channel => channel.isActive && channel.redeemMode === 'external-card')
-  .map(channel => ({
-    value: channel.key,
-    label: channel.name || channel.key
-  })))
-const orderTypeOptions: { value: PurchaseOrderType; label: string }[] = [
-  { value: 'warranty', label: '质保订单' },
-  { value: 'no_warranty', label: '无质保订单' },
-]
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-const updatingChannelId = ref<number | null>(null)
+
 const showImportExternalDialog = ref(false)
 const importExternalChannel = ref('')
 const importExternalCodesText = ref('')
 const importingExternal = ref(false)
-const checkingUpstreamCodeIds = ref<number[]>([])
-let popoverTimer: ReturnType<typeof setTimeout> | null = null
-const { success: showSuccessToast, info: showInfoToast, warning: showWarningToast, error: showErrorToast } = useToast()
 
-const accountsByEmail = computed(() => {
-  const map = new Map<string, GptAccount>()
-  for (const account of accounts.value) {
-    const normalizedEmail = String(account?.email || '').trim().toLowerCase()
-    if (!normalizedEmail) continue
-    map.set(normalizedEmail, account)
-  }
-  return map
+const selectedCodes = ref<number[]>([])
+const reinvitingCodeIds = ref<number[]>([])
+const updatingChannelId = ref<number | null>(null)
+const checkingUpstreamCodeIds = ref<number[]>([])
+
+const channelOptions = computed(() => {
+  const list = runtimeChannels.value.filter(channel => channel.isActive)
+  return list.length ? list : [{ key: 'common', name: '通用渠道', redeemMode: 'code', providerType: 'local', allowCommonFallback: false, isActive: true, isBuiltin: true, sortOrder: 10 }]
 })
 
-const isAccountBanned = (accountEmail?: string | null) => {
-  const normalizedEmail = String(accountEmail || '').trim().toLowerCase()
-  if (!normalizedEmail) return false
-  const account = accountsByEmail.value.get(normalizedEmail)
-  return Boolean(account?.isBanned)
-}
-
-const isCodeAccountBanned = (code?: RedemptionCode | null) => {
-  if (!code) return false
-  if (typeof code.accountIsBanned === 'boolean') return code.accountIsBanned
-  return isAccountBanned(code.accountEmail)
-}
-
-const getChannelConfig = (channel?: string | null) => {
-  const normalized = String(channel || '').trim().toLowerCase()
-  if (!normalized) return null
-  return channelConfigsByKey.value.get(normalized) || null
-}
-
-const isExternalCode = (code?: RedemptionCode | null) => {
-  if (!code) return false
-  if (code.fulfillmentMode === 'external_api') return true
-  return getChannelConfig(code.channel)?.redeemMode === 'external-card'
-}
-
-const normalizeSupplierStatus = (value?: string | null, fallback: string = 'pending') => {
-  const normalized = String(value || '').trim().toLowerCase()
-  return normalized || fallback
-}
-
-const isDownstreamSold = (code?: RedemptionCode | null) => Boolean(code?.isDownstreamSold)
+const batchChannelOptions = computed(() => channelOptions.value.filter(channel => channel.redeemMode !== 'external-card'))
+const externalImportChannelOptions = computed(() => channelOptions.value.filter(channel => channel.redeemMode === 'external-card'))
+const accountsByEmail = computed(() => new Map(accounts.value.map(account => [String(account.email || '').trim().toLowerCase(), account])))
 
 const getCodeStatusLabel = (code: RedemptionCode) => {
-  if (isDownstreamSold(code)) {
-    return '已下游售出'
+  if (code.fulfillmentMode === 'external_api') {
+    return code.supplierStatus || '待履约'
   }
-  if (!isExternalCode(code)) {
-    return code.isRedeemed ? '已使用' : '未使用'
-  }
-
-  const status = normalizeSupplierStatus(code.supplierStatus, code.isRedeemed ? 'success' : 'pending')
-  if (status === 'processing') return '处理中'
-  if (status === 'success') return '已履约'
-  if (status === 'used') return '已使用'
-  if (status === 'invalid') return '已失效'
-  if (status === 'failed') return '履约失败'
-  return '待兑换'
+  return code.isRedeemed ? '已使用' : '未使用'
 }
 
 const getCodeStatusClass = (code: RedemptionCode) => {
-  if (isDownstreamSold(code)) {
-    return 'bg-rose-50 text-rose-700 border-rose-200'
+  if (code.fulfillmentMode === 'external_api') {
+    return 'bg-blue-50 text-blue-700 border-blue-200'
   }
-  if (!isExternalCode(code)) {
-    return code.isRedeemed
-      ? 'bg-gray-50 text-gray-500 border-gray-200'
-      : 'bg-green-50 text-green-700 border-green-200'
-  }
-
-  const status = normalizeSupplierStatus(code.supplierStatus, code.isRedeemed ? 'success' : 'pending')
-  if (status === 'processing') return 'bg-blue-50 text-blue-700 border-blue-200'
-  if (status === 'success') return 'bg-emerald-50 text-emerald-700 border-emerald-200'
-  if (status === 'used') return 'bg-gray-50 text-gray-600 border-gray-200'
-  if (status === 'invalid') return 'bg-red-50 text-red-700 border-red-200'
-  if (status === 'failed') return 'bg-amber-50 text-amber-700 border-amber-200'
-  return 'bg-slate-50 text-slate-600 border-slate-200'
+  return code.isRedeemed ? 'bg-gray-50 text-gray-500 border-gray-200' : 'bg-green-50 text-green-700 border-green-200'
 }
 
-const getSupplierSummary = (code?: RedemptionCode | null) => {
-  if (!code || !isExternalCode(code)) return ''
-  return String(code.supplierName || code.supplierType || '').trim() || '上游供应商'
+const loadRuntimeConfig = async () => {
+  const runtime = await configService.getRuntimeConfig()
+  runtimeChannels.value = runtime.channels || []
 }
 
-const canCheckUpstreamCode = (code: RedemptionCode) => {
-  if (isDownstreamSold(code)) return false
-  const channelConfig = getChannelConfig(code.channel)
-  if (!channelConfig) return false
-  return channelConfig.redeemMode === 'external-card' && String(channelConfig.providerType || '').trim().toLowerCase() === 'platform-upstream'
+const loadAccounts = async () => {
+  const response = await gptAccountService.getAll({ page: 1, pageSize: 200 })
+  accounts.value = response.accounts || []
 }
-
-const canReinviteCode = (code: RedemptionCode) => code.isRedeemed && !isExternalCode(code)
-const canRedeemCode = (code: RedemptionCode) => {
-  if (isDownstreamSold(code)) return false
-  if (code.isRedeemed) return false
-  const supplierStatus = normalizeSupplierStatus(code.supplierStatus)
-  return supplierStatus !== 'invalid' && supplierStatus !== 'used' && supplierStatus !== 'processing'
-}
-const currentRedeemIsExternal = computed(() => isExternalCode(redeemTargetCode.value))
-const redeemDialogTitle = computed(() => currentRedeemIsExternal.value ? '执行上游兑换' : '发送兑换邀请')
-const redeemDialogActionLabel = computed(() => (
-  redeeming.value
-    ? (currentRedeemIsExternal.value ? '执行中...' : '发送中...')
-    : (currentRedeemIsExternal.value ? '确认兑换' : '确认发送')
-))
-const redeemEmailHelperText = computed(() => (
-  currentRedeemIsExternal.value
-    ? '将把该邮箱直接提交给上游履约接口。'
-    : '将向该邮箱发送 ChatGPT 成员邀请链接。'
-))
-
-// 同步相关状态（参考账号管理的同步按钮交互）
-const syncingAccountId = ref<number | null>(null)
-const syncingAccountEmail = ref<string | null>(null)
-const showSyncResultDialog = ref(false)
-const syncResult = ref<SyncUserCountResponse | null>(null)
-const syncError = ref('')
-const previousUserCount = ref<number | null>(null)
-const previousInviteCount = ref<number | null>(null)
-const deletingUserId = ref<string | null>(null)
-const showInviteForm = ref(false)
-const inviteEmail = ref('')
-const inviting = ref(false)
-const activeTab = ref<'members' | 'invites'>('members')
-const invitesList = ref<ChatgptAccountInviteItem[]>([])
-const loadingInvites = ref(false)
-
-const isCodeReserved = (code: RedemptionCode) => Boolean(code.reservedForEntryId)
-const reservationLabel = (code: RedemptionCode) => {
-  if (!isCodeReserved(code)) return ''
-  const segments: string[] = []
-  if (code.reservedForUsername) {
-    segments.push(code.reservedForUsername)
-  }
-  if (code.reservedForUid) {
-    segments.push(`UID ${code.reservedForUid}`)
-  }
-  return segments.length ? segments.join(' · ') : '候车绑定'
-}
-const extractRedeemerEmail = (redeemedBy?: string | null) => {
-  const raw = String(redeemedBy ?? '').trim()
-  if (!raw) return ''
-  const match = raw.match(/([^\s@|]+@[^\s@|]+\.[^\s@|]+)/)
-  if (match?.[1]) return match[1]
-  return EMAIL_REGEX.test(raw) ? raw : ''
-}
-const getRedeemerEmail = (code: RedemptionCode) => extractRedeemerEmail(code.redeemedBy)
-const getRedeemerDisplay = (code: RedemptionCode) => code.redeemedBy || code.reservedForUid || ''
-const hasPendingReservation = (code: RedemptionCode) => Boolean(code.reservedForUid && !code.isRedeemed)
-
-const hideTextPopover = () => {
-  showTextPopover.value = false
-  if (popoverTimer) {
-    clearTimeout(popoverTimer)
-    popoverTimer = null
-  }
-}
-
-const hideStatusTooltip = () => {
-  showStatusTooltip.value = false
-  statusTooltipText.value = ''
-}
-
-const handleStatusTooltipEnter = (code: RedemptionCode, event: MouseEvent) => {
-  const text = getCodeStatusTooltip(code)
-  if (!text) {
-    hideStatusTooltip()
-    return
-  }
-
-  const target = event.currentTarget as HTMLElement | null
-  if (target) {
-    const rect = target.getBoundingClientRect()
-    statusTooltipPosition.value = {
-      x: rect.left + rect.width / 2,
-      y: rect.top - 10,
-    }
-  } else {
-    const point = getEventPoint(event)
-    statusTooltipPosition.value = {
-      x: point.x,
-      y: point.y - 10,
-    }
-  }
-
-  statusTooltipText.value = text
-  showStatusTooltip.value = true
-}
-
-const getChannelLabel = (value?: string) => {
-  const fallback = channelOptions.value[0]?.label || '通用渠道'
-  if (!value) return fallback
-  return channelOptionsMap.value.get(value) || fallback
-}
-
-const handleChannelChange = async (target: RedemptionCode, nextChannel: string) => {
-  const normalized = String(nextChannel || '').trim().toLowerCase()
-  if (!normalized) return
-  if (target.channel === normalized || updatingChannelId.value === target.id) {
-    return
-  }
-  if (!channelOptionsMap.value.has(normalized)) {
-    showErrorToast('未知渠道，请刷新页面后重试')
-    return
-  }
-
-  updatingChannelId.value = target.id
-  try {
-    const { message, code } = await redemptionCodeService.updateChannel(target.id, normalized)
-    const updatedCode = code || {
-      ...target,
-      channel: normalized,
-      channelName: getChannelLabel(normalized)
-    }
-    const index = codes.value.findIndex(item => item.id === target.id)
-    if (index !== -1) {
-      codes.value[index] = {
-        ...codes.value[index],
-        ...updatedCode
-      }
-      codes.value = [...codes.value]
-    }
-    showSuccessToast(message || '渠道已更新')
-  } catch (err: any) {
-    showErrorToast(err.response?.data?.error || '更新渠道失败')
-  } finally {
-    updatingChannelId.value = null
-  }
-}
-
-// 分页相关状态
-const currentPage = ref(1)
-const pageSize = ref(10)
-
-// 搜索和筛选状态
-const searchQuery = ref('')
-const statusFilter = ref<'全部' | '已使用' | '未使用' | '已下游售出'>('全部')
-
-const getCodeStatusTooltip = (code: RedemptionCode) => {
-  if (isDownstreamSold(code) && code.downstreamSoldAt) {
-    return formatShanghaiDate(code.downstreamSoldAt, dateFormatOptions.value)
-  }
-  if (isExternalCode(code) && code.supplierResponseMessage) {
-    return code.supplierResponseMessage
-  }
-  return ''
-}
-
-// 计算总页数
-const totalPages = computed(() => Math.max(1, Math.ceil(totalCodes.value / pageSize.value)))
-const isCurrentPageAllSelected = computed(() => {
-  if (codes.value.length === 0) return false
-  const selectedSet = new Set(selectedCodes.value)
-  return codes.value.every(code => selectedSet.has(code.id))
-})
-
-// 切换页码
-const goToPage = async (page: number) => {
-  if (page < 1 || page > totalPages.value || page === currentPage.value) return
-  currentPage.value = page
-  await loadCodes()
-}
-
-// 重置搜索并返回第一页
-let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
-const handleSearch = () => {
-  currentPage.value = 1
-  if (searchDebounceTimer) {
-    clearTimeout(searchDebounceTimer)
-  }
-  searchDebounceTimer = setTimeout(() => {
-    loadCodes()
-  }, 300)
-}
-
-// 清空搜索和筛选
-const clearFilters = () => {
-  searchQuery.value = ''
-  statusFilter.value = '全部'
-  currentPage.value = 1
-  loadCodes()
-}
-
-const handleRefresh = async () => {
-  if (searchDebounceTimer) {
-    clearTimeout(searchDebounceTimer)
-    searchDebounceTimer = null
-  }
-  await Promise.all([
-    loadCodes(),
-    loadAccounts()
-  ])
-}
-
-const applySearchFromQuery = () => {
-  const raw = route.query.q ?? route.query.search ?? route.query.code
-  const value = Array.isArray(raw) ? raw[0] : raw
-  const normalized = typeof value === 'string' ? value.trim() : ''
-  if (!normalized || normalized === searchQuery.value) return false
-  searchQuery.value = normalized
-  currentPage.value = 1
-  return true
-}
-
-const loadChannels = async () => {
-  try {
-    const runtime = await configService.getRuntimeConfig()
-    const channels = Array.isArray(runtime.channels) ? runtime.channels : []
-    runtimeChannels.value = channels
-    appConfigStore.channels = channels
-    if (!channels.length) return
-
-    channelOptions.value = channels.map(channel => ({
-      value: channel.key,
-      label: channel.isActive ? channel.name : `${channel.name}（停用）`
-    }))
-
-    if (!batchChannelOptions.value.some(option => option.value === selectedBatchChannel.value)) {
-      selectedBatchChannel.value = batchChannelOptions.value[0]?.value || 'common'
-    }
-    if (!externalImportChannelOptions.value.some(option => option.value === importExternalChannel.value)) {
-      importExternalChannel.value = externalImportChannelOptions.value[0]?.value || ''
-    }
-  } catch (err) {
-    console.warn('[RedemptionCodes] load channels failed', err)
-  }
-}
-
-onMounted(async () => {
-  await nextTick()
-  teleportReady.value = !!document.getElementById('header-actions')
-
-  if (!authService.isAuthenticated()) {
-    router.push('/login')
-    return
-  }
-
-  applySearchFromQuery()
-  await Promise.all([
-    loadCodes(),
-    loadAccounts(),
-    loadChannels(),
-  ])
-
-  if (typeof window !== 'undefined') {
-    window.addEventListener('scroll', hideTextPopover, true)
-    window.addEventListener('scroll', hideStatusTooltip, true)
-  }
-})
-
-onUnmounted(() => {
-  teleportReady.value = false
-})
-
-onBeforeUnmount(() => {
-  hideTextPopover()
-  hideStatusTooltip()
-  if (typeof window !== 'undefined') {
-    window.removeEventListener('scroll', hideTextPopover, true)
-    window.removeEventListener('scroll', hideStatusTooltip, true)
-  }
-})
-
-watch(
-  () => route.query,
-  () => {
-    const changed = applySearchFromQuery()
-    if (changed) {
-      loadCodes()
-    }
-  },
-  { deep: true }
-)
-
-watch(statusFilter, () => {
-  currentPage.value = 1
-  loadCodes()
-})
 
 const loadCodes = async () => {
+  loading.value = true
+  error.value = ''
   try {
-    loading.value = true
-    error.value = ''
-
-    const status = statusFilter.value === '已使用'
-      ? 'redeemed'
-      : statusFilter.value === '未使用'
-        ? 'unused'
-        : statusFilter.value === '已下游售出'
-          ? 'downstream_sold'
-          : 'all'
-
     const response = await redemptionCodeService.list({
       page: currentPage.value,
       pageSize: pageSize.value,
       search: searchQuery.value.trim() || undefined,
-      status,
+      status: statusFilter.value,
     })
     codes.value = response.codes || []
     totalCodes.value = Number(response.pagination?.total || 0)
@@ -504,45 +110,25 @@ const loadCodes = async () => {
   }
 }
 
-const loadAccounts = async () => {
-  try {
-    // Backend caps pageSize at 100. If we request more, the API will still return 100
-    // but our pagination loop would stop early (batch.length < requested pageSize).
-    const pageSize = 100
-    let page = 1
-    const allAccounts: GptAccount[] = []
-
-    while (true) {
-      const response = await gptAccountService.getAll({ page, pageSize })
-      const batch = response.accounts || []
-      allAccounts.push(...batch)
-
-      const total = Number(response.pagination?.total ?? allAccounts.length)
-      const effectivePageSize = Number(response.pagination?.pageSize ?? pageSize)
-
-      if (allAccounts.length >= total) break
-      if (batch.length < effectivePageSize) break
-
-      page += 1
-      // Safety valve to avoid an infinite loop if the backend pagination breaks.
-      if (page > 200) break
-    }
-
-    accounts.value = allAccounts
-  } catch (err: any) {
-    console.error('加载账号列表失败:', err)
-  }
+const loadAll = async () => {
+  await Promise.all([loadRuntimeConfig(), loadAccounts(), loadCodes()])
 }
 
-const truncateText = (text?: string | null, maxLength: number = 20) => {
-  if (!text) return ''
-  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+const goToPage = (page: number) => {
+  if (page < 1 || page > totalPages.value || page === currentPage.value) return
+  currentPage.value = page
+  loadCodes()
+}
+
+const handleSearch = () => {
+  currentPage.value = 1
+  loadCodes()
 }
 
 const openBatchDialog = () => {
   batchCount.value = 10
-  selectedAccountEmail.value = accounts.value.length > 0 ? (accounts.value[0]?.email || '') : ''
-  selectedBatchChannel.value = batchChannelOptions.value[0]?.value || 'common'
+  selectedAccountEmail.value = accounts.value[0]?.email || ''
+  selectedBatchChannel.value = batchChannelOptions.value[0]?.key || 'common'
   showBatchDialog.value = true
 }
 
@@ -550,85 +136,31 @@ const closeBatchDialog = () => {
   showBatchDialog.value = false
   batchCount.value = 10
   selectedAccountEmail.value = ''
-  selectedBatchChannel.value = batchChannelOptions.value[0]?.value || 'common'
-}
-
-const openImportExternalDialog = () => {
-  const firstExternalChannel = externalImportChannelOptions.value[0]
-  if (!firstExternalChannel) {
-    showWarningToast('暂无 external-card 渠道，请先到系统设置中启用')
-    return
-  }
-  importExternalChannel.value = firstExternalChannel.value
-  importExternalCodesText.value = ''
-  showImportExternalDialog.value = true
-}
-
-const closeImportExternalDialog = () => {
-  showImportExternalDialog.value = false
-  importExternalChannel.value = externalImportChannelOptions.value[0]?.value || ''
-  importExternalCodesText.value = ''
-  importingExternal.value = false
-}
-
-const handleImportExternal = async () => {
-  if (!importExternalChannel.value) {
-    showWarningToast('请选择 external-card 渠道')
-    return
-  }
-  if (!importExternalCodesText.value.trim()) {
-    showWarningToast('请输入要导入的卡密')
-    return
-  }
-
-  importingExternal.value = true
-  try {
-    const result = await redemptionCodeService.importExternal({
-      channel: importExternalChannel.value,
-      codesText: importExternalCodesText.value
-    })
-    await loadCodes()
-    closeImportExternalDialog()
-
-    if (result.duplicates > 0) {
-      showInfoToast(`成功导入 ${result.imported} 个，重复 ${result.duplicates} 个`)
-      return
-    }
-    showSuccessToast(result.message || `成功导入 ${result.imported} 个外部卡密`)
-  } catch (err: any) {
-    showErrorToast(err.response?.data?.error || '导入外部卡密失败')
-  } finally {
-    importingExternal.value = false
-  }
+  selectedBatchChannel.value = batchChannelOptions.value[0]?.key || 'common'
 }
 
 const handleBatchCreate = async () => {
   if (batchCount.value < 1 || batchCount.value > 1000) {
-    error.value = '数量必须在 1-1000 之间'
+    showWarningToast('数量必须在 1-1000 之间')
     return
   }
-
   if (!selectedAccountEmail.value) {
-    error.value = '请选择所属账号'
+    showWarningToast('请选择所属账号')
     return
   }
   if (!selectedBatchChannel.value) {
-    error.value = '请选择渠道'
+    showWarningToast('请选择渠道')
     return
   }
 
   creating.value = true
-  error.value = ''
-
   try {
     const result = await redemptionCodeService.batchCreate(batchCount.value, selectedAccountEmail.value, selectedBatchChannel.value)
     await loadCodes()
     closeBatchDialog()
-
-    // 显示成功提示
     showSuccessToast(`成功创建 ${result.codes.length} 个兑换码${result.failed > 0 ? `，失败 ${result.failed} 个` : ''}`)
   } catch (err: any) {
-    error.value = err.response?.data?.error || '创建兑换码失败'
+    showErrorToast(err.response?.data?.error || '创建兑换码失败')
   } finally {
     creating.value = false
   }
@@ -636,37 +168,30 @@ const handleBatchCreate = async () => {
 
 const handleDelete = async (id: number) => {
   if (!confirm('确定要删除这个兑换码吗？')) return
-
   try {
     await redemptionCodeService.delete(id)
     await loadCodes()
+    showSuccessToast('兑换码已删除')
   } catch (err: any) {
-    error.value = err.response?.data?.error || '删除失败'
+    showErrorToast(err.response?.data?.error || '删除失败')
   }
 }
 
-const isCheckingUpstream = (id: number) => checkingUpstreamCodeIds.value.includes(id)
-
-const applyUpdatedCode = (updatedCode?: RedemptionCode | null) => {
-  if (!updatedCode) return
-  const index = codes.value.findIndex(item => item.id === updatedCode.id)
-  if (index === -1) return
-  codes.value[index] = {
-    ...codes.value[index],
-    ...updatedCode
+const handleBatchDelete = async () => {
+  if (!selectedCodes.value.length) return
+  if (!confirm(`确定删除选中的 ${selectedCodes.value.length} 个兑换码吗？`)) return
+  try {
+    await redemptionCodeService.batchDelete(selectedCodes.value)
+    selectedCodes.value = []
+    await loadCodes()
+    showSuccessToast('批量删除成功')
+  } catch (err: any) {
+    showErrorToast(err.response?.data?.error || '批量删除失败')
   }
-  codes.value = [...codes.value]
 }
 
 const isReinviting = (id: number) => reinvitingCodeIds.value.includes(id)
 const handleReinvite = async (code: RedemptionCode) => {
-  if (!code.isRedeemed) {
-    showWarningToast('该兑换码尚未使用，无法重新邀请')
-    return
-  }
-
-  if (isReinviting(code.id)) return
-
   reinvitingCodeIds.value = [...reinvitingCodeIds.value, code.id]
   try {
     const result = await redemptionCodeService.reinvite(code.id)
@@ -678,1277 +203,313 @@ const handleReinvite = async (code: RedemptionCode) => {
   }
 }
 
-const handleCheckUpstreamCode = async (code: RedemptionCode) => {
-  if (!canCheckUpstreamCode(code)) {
-    showWarningToast('当前兑换码未配置平台通用接口检查')
-    return
-  }
-  if (isCheckingUpstream(code.id)) return
-
-  checkingUpstreamCodeIds.value = [...checkingUpstreamCodeIds.value, code.id]
-  try {
-    const result = await redemptionCodeService.checkUpstream(code.id)
-    applyUpdatedCode(result.code)
-
-    const status = String(result.result?.status || '').trim().toLowerCase()
-    const message = result.result?.message || result.message || '上游检查完成'
-    if (status === 'available') {
-      showSuccessToast(message)
-      return
-    }
-    if (status === 'used' || status === 'invalid') {
-      showWarningToast(message)
-      return
-    }
-    if (status === 'failed') {
-      showErrorToast(message)
-      return
-    }
-    showInfoToast(message)
-  } catch (err: any) {
-    showErrorToast(err.response?.data?.error || '上游检查失败')
-  } finally {
-    checkingUpstreamCodeIds.value = checkingUpstreamCodeIds.value.filter(id => id !== code.id)
-  }
-}
-
-const toggleSelectAll = () => {
-  const pageIds = codes.value.map(code => code.id)
-  if (pageIds.length === 0) return
-
-  const selectedSet = new Set(selectedCodes.value)
-  const allSelected = pageIds.every(id => selectedSet.has(id))
-  if (allSelected) {
-    selectedCodes.value = selectedCodes.value.filter(id => !pageIds.includes(id))
-    return
-  }
-
-  for (const id of pageIds) {
-    selectedSet.add(id)
-  }
-  selectedCodes.value = Array.from(selectedSet)
-}
-
-const toggleSelect = (id: number) => {
-  const index = selectedCodes.value.indexOf(id)
-  if (index > -1) {
-    selectedCodes.value.splice(index, 1)
-  } else {
-    selectedCodes.value.push(id)
-  }
-}
-
-const handleBatchDelete = async () => {
-  if (selectedCodes.value.length === 0) {
-    showWarningToast('请选择要删除的兑换码')
-    return
-  }
-
-  if (!confirm(`确定要删除选中的 ${selectedCodes.value.length} 个兑换码吗？`)) return
-
-  try {
-    await redemptionCodeService.batchDelete(selectedCodes.value)
-    selectedCodes.value = []
-    await loadCodes()
-  } catch (err: any) {
-    error.value = err.response?.data?.error || '批量删除失败'
-  }
-}
-
-const copyToClipboard = async (text: string, options: { silent?: boolean } = {}) => {
-  const { silent = false } = options
-  try {
-    await navigator.clipboard.writeText(text)
-    if (!silent) {
-      showSuccessToast('已复制到剪贴板')
-    }
-  } catch (err) {
-    const textarea = document.createElement('textarea')
-    textarea.value = text
-    document.body.appendChild(textarea)
-    textarea.select()
-    document.execCommand('copy')
-    document.body.removeChild(textarea)
-    if (!silent) {
-      showSuccessToast('已复制到剪贴板')
-    }
-  }
-}
-
-const handleCopyRedeemerEmail = async (code: RedemptionCode) => {
-  const email = getRedeemerEmail(code)
-  if (!email) {
-    showWarningToast('暂无可复制的邮箱')
-    return
-  }
-  await copyToClipboard(email)
-}
-
-const getEventPoint = (event: MouseEvent | TouchEvent) => {
-  if ('touches' in event) {
-    const touch = event.touches.item(0)
-    if (touch) {
-      return { x: touch.clientX, y: touch.clientY }
-    }
-  }
-
-  const mouseEvent = event as MouseEvent
-  const fallbackX = typeof window !== 'undefined' ? window.innerWidth / 2 : 0
-  const fallbackY = typeof window !== 'undefined' ? window.innerHeight / 2 : 0
-  return {
-    x: typeof mouseEvent.clientX === 'number' ? mouseEvent.clientX : fallbackX,
-    y: typeof mouseEvent.clientY === 'number' ? mouseEvent.clientY : fallbackY
-  }
-}
-
-const handleTextPreview = async (text: string, event: MouseEvent | TouchEvent) => {
-  if (!text || !text.trim()) return
-
-  const point = getEventPoint(event)
-  popoverText.value = text
-  popoverPosition.value = point
-  showTextPopover.value = true
-
-  if (popoverTimer) {
-    clearTimeout(popoverTimer)
-  }
-  popoverTimer = window.setTimeout(() => {
-    showTextPopover.value = false
-    popoverTimer = null
-  }, 2000)
-
-  try {
-    await copyToClipboard(text, { silent: true })
-  } catch (error) {
-    showErrorToast('复制失败，请手动选择文本')
-  }
-}
-
-const exportCodes = async () => {
-  try {
-    const exportPageSize = 200
-    let page = 1
-    const exported: string[] = []
-
-    while (true) {
-      const response = await redemptionCodeService.list({
-        page,
-        pageSize: exportPageSize,
-        status: 'unused',
-      })
-      const batch = (response.codes || []).map(item => item.code).filter(Boolean)
-      exported.push(...batch)
-
-      const total = Number(response.pagination?.total || 0)
-      if (!total || exported.length >= total) break
-      if (batch.length < exportPageSize) break
-
-      page += 1
-      if (page > 5000) break
-    }
-
-    if (exported.length === 0) {
-      showInfoToast('没有未使用的兑换码可导出')
-      return
-    }
-
-    const content = exported.join('\n')
-    const blob = new Blob([content], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `兑换码_${new Date().toISOString().split('T')[0]}.txt`
-    a.click()
-    URL.revokeObjectURL(url)
-  } catch (err: any) {
-    showErrorToast(err.response?.data?.error || '导出失败')
-  }
-}
-
 const openRedeemDialog = (code: RedemptionCode) => {
-  if (code.isRedeemed) {
-    showWarningToast('该兑换码已被使用，无法再次兑换')
-    return
-  }
-
   redeemTargetCode.value = code
-  redeemEmail.value = code.redeemedBy || ''
-  redeemOrderType.value = code.orderType === 'no_warranty' ? 'no_warranty' : 'warranty'
+  redeemEmail.value = ''
   showRedeemDialog.value = true
 }
 
-const closeRedeemDialog = () => {
-  showRedeemDialog.value = false
-  redeemTargetCode.value = null
-  redeemEmail.value = ''
-  redeemOrderType.value = 'warranty'
-  redeeming.value = false
-}
-
-const handleRedeemInvite = async () => {
-  if (!redeemTargetCode.value) {
-    showErrorToast('请选择要兑换的兑换码')
-    return
-  }
-
-  const email = redeemEmail.value.trim()
-
-  if (!email) {
-    showWarningToast('请输入兑换所需的邮箱')
-    return
-  }
-
-  if (!EMAIL_REGEX.test(email)) {
-    showWarningToast('邮箱格式不正确')
-    return
-  }
-
+const handleRedeem = async () => {
+  if (!redeemTargetCode.value || !redeemEmail.value.trim()) return
   redeeming.value = true
   try {
-    const response = await redemptionCodeService.redeemAdmin({
-      email,
+    await redemptionCodeService.redeemAdmin({
       code: redeemTargetCode.value.code,
-      channel: redeemTargetCode.value.channel || 'common',
-      orderType: redeemOrderType.value
+      email: redeemEmail.value.trim(),
+      channel: redeemTargetCode.value.channel,
     })
-
-    const successMessage = response.data?.data?.message
-      || response.data?.message
-      || (currentRedeemIsExternal.value ? '上游兑换成功' : '兑换成功，邀请已发送')
-    showSuccessToast(successMessage)
+    showSuccessToast('兑换成功')
+    showRedeemDialog.value = false
     await loadCodes()
-    closeRedeemDialog()
+    await loadAccounts()
   } catch (err: any) {
-    const message = err.response?.data?.message || err.response?.data?.error || '兑换失败，请稍后再试'
-    showErrorToast(message)
+    showErrorToast(err.response?.data?.message || err.response?.data?.error || '后台兑换失败')
   } finally {
     redeeming.value = false
   }
 }
 
-const applySyncResultToAccountsState = (result: SyncUserCountResponse) => {
-  syncResult.value = result
-
-  const index = accounts.value.findIndex(a => a.id === result.account.id)
-  if (index !== -1) {
-    const current = accounts.value[index]
-    if (!current) return
-    const nextInviteCount = typeof result.inviteCount === 'number'
-      ? result.inviteCount
-      : typeof result.account.inviteCount === 'number'
-        ? result.account.inviteCount
-        : current.inviteCount
-    accounts.value[index] = {
-      ...current,
-      userCount: result.syncedUserCount,
-      inviteCount: typeof nextInviteCount === 'number' ? nextInviteCount : current.inviteCount,
-      updatedAt: result.account.updatedAt
+const handleChannelChange = async (target: RedemptionCode, nextChannel: string) => {
+  if (!nextChannel || updatingChannelId.value === target.id || nextChannel === target.channel) return
+  updatingChannelId.value = target.id
+  try {
+    const { message, code } = await redemptionCodeService.updateChannel(target.id, nextChannel)
+    const index = codes.value.findIndex(item => item.id === target.id)
+    if (index !== -1) {
+      codes.value[index] = { ...codes.value[index], ...code }
+      codes.value = [...codes.value]
     }
-    accounts.value = [...accounts.value]
-  }
-}
-
-const loadInvites = async (accountId: number) => {
-  loadingInvites.value = true
-  try {
-    const response = await gptAccountService.getInvites(accountId)
-    invitesList.value = response.items || []
-  } catch (err) {
-    console.error('Failed to load invites:', err)
-  } finally {
-    loadingInvites.value = false
-  }
-}
-
-const resetInviteForm = () => {
-  inviteEmail.value = ''
-  showInviteForm.value = false
-  inviting.value = false
-}
-
-const closeSyncResultDialog = () => {
-  showSyncResultDialog.value = false
-  syncResult.value = null
-  syncError.value = ''
-  previousUserCount.value = null
-  previousInviteCount.value = null
-  invitesList.value = []
-  activeTab.value = 'members'
-  resetInviteForm()
-}
-
-const refreshAccountSyncResult = async (accountId: number) => {
-  try {
-    const latestResult = await gptAccountService.syncUserCount(accountId)
-    applySyncResultToAccountsState(latestResult)
-    previousUserCount.value = latestResult.syncedUserCount
-    previousInviteCount.value = typeof latestResult.inviteCount === 'number'
-      ? latestResult.inviteCount
-      : typeof latestResult.account?.inviteCount === 'number'
-        ? latestResult.account.inviteCount
-        : previousInviteCount.value
+    showSuccessToast(message || '渠道已更新')
   } catch (err: any) {
-    const message = err.response?.data?.error || '删除成功，但重新同步失败，请稍后再试'
-    showErrorToast(message)
-  }
-}
-
-const handleSyncUserCount = async (account: GptAccount) => {
-  if (syncingAccountId.value === account.id) return
-
-  syncingAccountId.value = account.id
-  syncError.value = ''
-  syncResult.value = null
-  invitesList.value = []
-  activeTab.value = 'members'
-  previousUserCount.value = account.userCount
-  previousInviteCount.value = typeof account.inviteCount === 'number' ? account.inviteCount : null
-
-  try {
-    const result = await gptAccountService.syncUserCount(account.id)
-    applySyncResultToAccountsState(result)
-
-    showSyncResultDialog.value = true
-    loadInvites(account.id)
-  } catch (err: any) {
-    syncError.value = err.response?.data?.error || '同步失败，请检查网络连接和账号配置'
-    showSyncResultDialog.value = true
+    showErrorToast(err.response?.data?.error || '更新渠道失败')
   } finally {
-    syncingAccountId.value = null
+    updatingChannelId.value = null
   }
 }
 
-const resolveAccountByEmail = async (email: string): Promise<GptAccount | null> => {
-  const normalized = String(email || '').trim().toLowerCase()
-  if (!normalized) return null
+const openImportExternalDialog = () => {
+  const first = externalImportChannelOptions.value[0]
+  if (!first) {
+    showWarningToast('暂无 external-card 渠道，请先在系统设置中创建')
+    return
+  }
+  importExternalChannel.value = first.key
+  importExternalCodesText.value = ''
+  showImportExternalDialog.value = true
+}
 
-  const localMatch = accounts.value.find(account => String(account.email || '').trim().toLowerCase() === normalized)
-  if (localMatch) return localMatch
-
+const handleImportExternal = async () => {
+  if (!importExternalChannel.value || !importExternalCodesText.value.trim()) {
+    showWarningToast('请选择渠道并填写卡密')
+    return
+  }
+  importingExternal.value = true
   try {
-    const response = await gptAccountService.getAll({ page: 1, pageSize: 100, search: normalized })
-    const exact = (response.accounts || []).find(account => String(account.email || '').trim().toLowerCase() === normalized)
-    return exact || null
-  } catch (err) {
-    return null
+    const result = await redemptionCodeService.importExternal({
+      channel: importExternalChannel.value,
+      codesText: importExternalCodesText.value,
+    })
+    await loadCodes()
+    showImportExternalDialog.value = false
+    showInfoToast(`成功导入 ${result.imported} 个，重复 ${result.duplicates} 个`)
+  } catch (err: any) {
+    showErrorToast(err.response?.data?.error || '导入外部卡密失败')
+  } finally {
+    importingExternal.value = false
   }
 }
 
-const handleSyncAccountByEmail = async (email?: string) => {
-  const normalized = String(email || '').trim()
-  if (!normalized) return
-  if (syncingAccountEmail.value === normalized) return
+const isCheckingUpstream = (id: number) => checkingUpstreamCodeIds.value.includes(id)
+const handleSelectAllCodes = (event: Event) => {
+  const target = event.target as HTMLInputElement | null
+  selectedCodes.value = target?.checked ? codes.value.map(code => code.id) : []
+}
 
-  syncingAccountEmail.value = normalized
+const handleCodeChannelSelect = (code: RedemptionCode, event: Event) => {
+  const target = event.target as HTMLSelectElement | null
+  if (!target) return
+  handleChannelChange(code, target.value)
+}
+
+const handleCheckUpstream = async (code: RedemptionCode) => {
+  checkingUpstreamCodeIds.value = [...checkingUpstreamCodeIds.value, code.id]
   try {
-    const account = await resolveAccountByEmail(normalized)
-    if (!account) {
-      showErrorToast('未找到该邮箱对应的账号')
-      return
+    const result = await redemptionCodeService.checkUpstream(code.id)
+    showInfoToast(result.result?.message || result.message || '已完成上游状态检查')
+    if (result.code) {
+      const index = codes.value.findIndex(item => item.id === code.id)
+      if (index !== -1) {
+        codes.value[index] = { ...codes.value[index], ...result.code }
+        codes.value = [...codes.value]
+      }
     }
-    await handleSyncUserCount(account)
-  } finally {
-    syncingAccountEmail.value = null
-  }
-}
-
-const handleDeleteSyncedUser = async (userId?: string) => {
-  if (!syncResult.value || !syncResult.value.account || !userId) {
-    showErrorToast('缺少必要的账号或成员信息')
-    return
-  }
-
-  if (!confirm('确定要从 ChatGPT 账号中删除该成员吗？此操作不可撤销。')) {
-    return
-  }
-
-  deletingUserId.value = userId
-  try {
-    const result = await gptAccountService.deleteAccountUser(syncResult.value.account.id, userId)
-    applySyncResultToAccountsState(result)
-    previousUserCount.value = result.syncedUserCount
-    showSuccessToast(result.message || '成员已删除')
-    await refreshAccountSyncResult(result.account.id)
   } catch (err: any) {
-    showErrorToast(err.response?.data?.error || '删除失败')
+    showErrorToast(err.response?.data?.error || '检查上游状态失败')
   } finally {
-    deletingUserId.value = null
+    checkingUpstreamCodeIds.value = checkingUpstreamCodeIds.value.filter(id => id !== code.id)
   }
 }
 
-const handleInviteSubmit = async () => {
-  if (!syncResult.value || !syncResult.value.account) {
-    showErrorToast('请先同步账号后再邀请成员')
+onMounted(async () => {
+  if (!authService.isAuthenticated()) {
+    router.push('/login')
     return
   }
-
-  const email = inviteEmail.value.trim()
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-
-  if (!email) {
-    showErrorToast('请输入邮箱地址')
-    return
-  }
-
-  if (!emailRegex.test(email)) {
-    showErrorToast('邮箱格式不正确')
-    return
-  }
-
-  inviting.value = true
-  try {
-    const result = await gptAccountService.inviteAccountUser(syncResult.value.account.id, email)
-    showSuccessToast(result.message || '邀请已发送')
-    resetInviteForm()
-    await loadInvites(syncResult.value.account.id)
-    activeTab.value = 'invites'
-  } catch (err: any) {
-    showErrorToast(err.response?.data?.error || '邀请失败')
-  } finally {
-    inviting.value = false
-  }
-}
+  await loadAll()
+})
 </script>
 
 <template>
-  <div class="space-y-8">
-    <!-- Header Actions -->
-    <Teleport v-if="teleportReady" to="#header-actions">
-       <div class="flex items-center gap-3 flex-wrap justify-end">
-          <Button
-            variant="outline"
-            class="h-10 border-gray-200 bg-white"
-            :disabled="loading"
-            @click="handleRefresh"
-          >
-            <RefreshCw class="w-4 h-4 mr-2" :class="{ 'animate-spin': loading }" />
-            刷新列表
-          </Button>
-          <Button @click="exportCodes" variant="outline" class="h-10 bg-white border-gray-200">
-            <Download class="mr-2 h-4 w-4" />
-            导出
-          </Button>
-          <Button @click="openImportExternalDialog" variant="outline" class="h-10 bg-white border-gray-200">
-            <Upload class="mr-2 h-4 w-4" />
-            导入外部卡密
-          </Button>
-          <Button @click="openBatchDialog" class="h-10 bg-black hover:bg-gray-800 text-white rounded-xl shadow-lg shadow-black/10">
-            <Plus class="mr-2 h-4 w-4" />
-            批量生成
-          </Button>
-       </div>
-    </Teleport>
-
-    <!-- Filter Bar -->
-    <div class="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-      <div class="flex flex-wrap items-center gap-3 w-full sm:w-auto">
-        <div class="relative group w-full sm:w-72">
-          <Search class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-blue-500 h-4 w-4 transition-colors" />
-          <Input
-            v-model="searchQuery"
-            @input="handleSearch"
-            placeholder="搜索兑换码 / 邮箱 / 用户..."
-            class="pl-9 h-11 bg-white border-transparent shadow-[0_2px_10px_rgba(0,0,0,0.03)] focus:shadow-[0_4px_12px_rgba(0,0,0,0.06)] rounded-xl transition-all"
-          />
-        </div>
-        <Select v-model="statusFilter">
-          <SelectTrigger class="h-11 w-[140px] bg-white border-transparent shadow-[0_2px_10px_rgba(0,0,0,0.03)] rounded-xl">
-            <SelectValue placeholder="状态筛选" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="全部">全部状态</SelectItem>
-            <SelectItem value="未使用">未使用</SelectItem>
-            <SelectItem value="已使用">已使用</SelectItem>
-            <SelectItem value="已下游售出">已下游售出</SelectItem>
-          </SelectContent>
-        </Select>
+  <div class="space-y-6">
+    <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+      <div>
+        <h1 class="text-2xl font-semibold text-gray-900">兑换码管理</h1>
+        <p class="text-sm text-gray-500">管理库存、创建兑换码、后台兑换和外部卡密导入。</p>
       </div>
-
-       <div v-if="selectedCodes.length > 0" class="animate-in fade-in slide-in-from-right-4">
-          <Button
-            variant="destructive"
-            size="sm"
-            @click="handleBatchDelete"
-            class="h-10 rounded-xl px-4 shadow-sm"
-          >
-            <Trash2 class="mr-2 h-4 w-4" />
-            批量删除 ({{ selectedCodes.length }})
-          </Button>
-        </div>
-    </div>
-
-    <!-- Error Message -->
-    <div v-if="error" class="rounded-2xl border border-red-100 bg-red-50/50 p-4 flex items-center gap-3 text-red-600 animate-in slide-in-from-top-2">
-      <AlertTriangle class="h-5 w-5" />
-      <span class="font-medium">{{ error }}</span>
-    </div>
-
-    <!-- Main Content -->
-    <div class="bg-white rounded-[32px] shadow-sm border border-gray-100 overflow-hidden min-h-[400px]">
-      
-      <!-- Loading State -->
-      <div v-if="loading" class="flex flex-col items-center justify-center py-20">
-        <div class="w-10 h-10 border-4 border-blue-500/20 border-t-blue-500 rounded-full animate-spin"></div>
-        <p class="text-gray-400 text-sm font-medium mt-4">正在加载兑换码...</p>
-      </div>
-
-      <!-- Empty State -->
-      <div v-else-if="codes.length === 0" class="flex flex-col items-center justify-center py-24 text-center">
-        <div class="w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center mb-4">
-          <Ticket class="w-8 h-8 text-gray-400" />
-        </div>
-        <h3 class="text-lg font-semibold text-gray-900">暂无兑换码</h3>
-        <p class="text-gray-500 text-sm mt-1 mb-6">没有符合当前筛选条件的兑换码</p>
-        <Button
-          v-if="searchQuery || statusFilter !== '全部'"
-          variant="outline"
-          @click="clearFilters"
-          class="rounded-xl border-gray-200"
-        >
-          清除筛选条件
+      <div class="flex gap-3">
+        <Input v-model="searchQuery" placeholder="搜索兑换码 / 账号邮箱" class="h-11 w-[280px] rounded-xl" @keyup.enter="handleSearch" />
+        <select v-model="statusFilter" class="h-11 rounded-xl border border-gray-200 bg-white px-3 text-sm" @change="handleSearch">
+          <option value="all">全部</option>
+          <option value="unused">未使用</option>
+          <option value="redeemed">已使用</option>
+        </select>
+        <Button variant="outline" class="h-11 rounded-xl" :disabled="loading" @click="loadAll">
+          <RefreshCw class="mr-2 h-4 w-4" :class="loading ? 'animate-spin' : ''" />刷新
         </Button>
-         <Button
-            v-else
-            class="rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-200"
-            @click="openBatchDialog"
-          >
-            立即生成
-          </Button>
-      </div>
-
-      <!-- Table & Mobile List -->
-      <div v-else>
-        <!-- Desktop Table -->
-        <div class="hidden md:block overflow-x-auto">
-          <table class="w-full">
-            <thead>
-              <tr class="border-b border-gray-100 bg-gray-50/50">
-                <th class="w-[50px] px-6 py-5">
-                   <input
-                      type="checkbox"
-                      :checked="isCurrentPageAllSelected"
-                      @change="toggleSelectAll"
-                      class="rounded-md border-gray-300 text-blue-600 focus:ring-blue-500 w-4 h-4"
-                    />
-                </th>
-                <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">兑换码</th>
-                <th class="px-6 py-5 text-center text-xs font-semibold text-gray-400 uppercase tracking-wider">状态</th>
-                <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">渠道</th>
-                <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">所属账号</th>
-                <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">兑换用户</th>
-                <th class="px-6 py-5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">创建时间</th>
-                <th class="px-6 py-5 text-right text-xs font-semibold text-gray-400 uppercase tracking-wider">操作</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-50">
-              <tr 
-                v-for="code in codes" 
-                :key="code.id"
-                class="group hover:bg-blue-50/30 transition-colors duration-200"
-              >
-                 <td class="px-6 py-5">
-                    <input
-                      type="checkbox"
-                      :checked="selectedCodes.includes(code.id)"
-                      @change="toggleSelect(code.id)"
-                      class="rounded-md border-gray-300 text-blue-600 focus:ring-blue-500 w-4 h-4"
-                    />
-                 </td>
-                <td class="px-6 py-5">
-                  <span
-                     class="inline-flex font-mono text-sm font-medium text-gray-900 bg-gray-100 px-2 py-1 rounded cursor-pointer hover:bg-gray-200 transition-colors"
-                     @click="copyToClipboard(code.code)"
-                  >
-                     {{ code.code }}
-                  </span>
-                </td>
-                <td class="px-6 py-5 text-center">
-                  <div class="flex flex-col items-center gap-1.5">
-                    <span
-                      class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold border"
-                      :class="[getCodeStatusClass(code), getCodeStatusTooltip(code) ? 'cursor-help' : '']"
-                      @mouseenter="handleStatusTooltipEnter(code, $event)"
-                      @mouseleave="hideStatusTooltip"
-                    >
-                      {{ getCodeStatusLabel(code) }}
-                    </span>
-                    <span
-                      v-if="!code.isRedeemed && isCodeReserved(code)"
-                      class="rounded-full bg-orange-50 px-2 py-0.5 text-xs font-medium text-orange-600 border border-orange-200"
-                    >
-                      已绑定
-                    </span>
-                  </div>
-                </td>
-                <td class="px-6 py-5">
-                  <Select
-                     :model-value="code.channel || 'common'"
-                     @update:modelValue="value => handleChannelChange(code, value)"
-                     :disabled="updatingChannelId === code.id"
-                   >
-                     <SelectTrigger class="w-[140px] h-8 text-xs border-transparent bg-transparent hover:bg-white hover:border-gray-200 rounded-lg transition-all focus:ring-0">
-                       <SelectValue
-                         placeholder="选择渠道"
-                         :display-text="code.channelName || getChannelLabel(code.channel)"
-                       />
-                     </SelectTrigger>
-                     <SelectContent>
-                       <SelectItem v-for="option in channelOptions" :key="option.value" :value="option.value">
-                         {{ option.label }}
-                       </SelectItem>
-                     </SelectContent>
-                   </Select>
-                </td>
-                <td class="px-6 py-5">
-                  <div class="flex items-center gap-2">
-                    <div class="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center text-xs text-gray-500 font-bold">
-		                       {{ code.accountEmail ? code.accountEmail.charAt(0).toUpperCase() : '?' }}
-                    </div>
-                    <template v-if="code.accountEmail">
-                      <button
-                        type="button"
-                        class="inline-flex items-center gap-1 text-sm text-gray-600 truncate max-w-[180px] hover:text-blue-600 hover:underline transition-colors disabled:opacity-60 disabled:hover:no-underline"
-                        :title="code.accountEmail"
-                        :disabled="syncingAccountEmail === code.accountEmail"
-                        @click="handleSyncAccountByEmail(code.accountEmail)"
-                      >
-                        <span class="truncate" :class="isCodeAccountBanned(code) ? 'text-red-600' : ''">{{ code.accountEmail }}</span>
-                        <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': syncingAccountEmail === code.accountEmail }" />
-	                      </button>
-	                    </template>
-	                    <span v-else class="text-sm text-gray-400">-</span>
-	                  </div>
-	                </td>
-                <td class="px-6 py-5">
-                   <div class="flex flex-col items-start gap-1">
-                      <span
-                        class="text-sm font-medium text-gray-900 truncate max-w-[150px]"
-                        :class="getRedeemerEmail(code) ? 'cursor-pointer hover:text-blue-600' : ''"
-                        :title="getRedeemerDisplay(code) || '-'"
-                        @click="getRedeemerEmail(code) ? handleCopyRedeemerEmail(code) : null"
-                      >
-                        {{ getRedeemerDisplay(code) || '-' }}
-                      </span>
-                      <span
-                        v-if="hasPendingReservation(code)"
-                        class="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-xs font-medium text-orange-600"
-                      >
-                        待兑换
-                      </span>
-                      <span
-                        v-else-if="code.isRedeemed && !isExternalCode(code)"
-                        class="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-600"
-                      >
-                        {{ code.orderType === 'no_warranty' ? '无质保' : (code.orderType === 'anti_ban' ? '防封禁' : '质保') }}
-                      </span>
-                   </div>
-                </td>
-                <td class="px-6 py-5 text-sm text-gray-500">{{ formatShanghaiDate(code.createdAt, dateFormatOptions).split(' ')[0] }}</td>
-	                <td class="px-6 py-5 text-right">
-	                  <div class="flex items-center justify-end gap-1">
-	                    <Button
-	                      v-if="canCheckUpstreamCode(code)"
-	                      size="icon"
-	                      variant="ghost"
-	                      class="h-8 w-8 text-gray-400 hover:text-sky-600 hover:bg-sky-50 rounded-lg"
-	                      @click="handleCheckUpstreamCode(code)"
-	                      :disabled="isCheckingUpstream(code.id)"
-	                      title="检查上游卡密"
-	                    >
-	                      <Search class="w-4 h-4" :class="isCheckingUpstream(code.id) ? 'animate-spin' : ''" />
-	                    </Button>
-	                    <!-- Reinvite -->
-	                    <Button
-	                      v-if="canReinviteCode(code)"
-	                      size="icon"
-	                      variant="ghost"
-	                      class="h-8 w-8 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg"
-	                      @click="handleReinvite(code)"
-	                      :disabled="isReinviting(code.id)"
-	                      title="重新邀请"
-	                    >
-	                      <RefreshCcw class="w-4 h-4" :class="isReinviting(code.id) ? 'animate-spin' : ''" />
-	                    </Button>
-	                    <!-- Redeem -->
-	                    <Button
-	                      v-else-if="canRedeemCode(code)"
-	                      size="icon"
-	                      variant="ghost"
-	                      class="h-8 w-8 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg"
-	                      @click="openRedeemDialog(code)"
-	                      :title="isExternalCode(code) ? '执行上游兑换' : '发起兑换'"
-	                    >
-	                      <Ticket class="w-4 h-4" />
-	                    </Button>
-
-	                    <!-- Delete -->
-	                    <Button 
-	                      size="icon" 
-                      variant="ghost" 
-                      class="h-8 w-8 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg"
-                      @click="handleDelete(code.id)"
-                      title="删除"
-                    >
-                      <Trash2 class="w-4 h-4" />
-                    </Button>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <!-- Mobile Card List -->
-        <div class="md:hidden p-4 space-y-4 bg-gray-50/50">
-          <div v-for="code in codes" :key="code.id" class="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
-             <div class="flex items-start justify-between mb-4">
-                <div>
-                   <span 
-                      class="inline-flex font-mono text-sm font-medium text-gray-900 bg-gray-100 px-2 py-1 rounded cursor-pointer active:bg-gray-200 transition-colors"
-                      @click="copyToClipboard(code.code)"
-                   >
-                      {{ code.code }}
-                   </span>
-                </div>
-                <div class="flex flex-col items-end gap-1.5">
-                  <span
-                    class="inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold border"
-                    :class="[getCodeStatusClass(code), getCodeStatusTooltip(code) ? 'cursor-help' : '']"
-                    @mouseenter="handleStatusTooltipEnter(code, $event)"
-                    @mouseleave="hideStatusTooltip"
-                  >
-                     {{ getCodeStatusLabel(code) }}
-                  </span>
-                  <span
-                    v-if="!code.isRedeemed && isCodeReserved(code)"
-                    class="rounded-full bg-orange-50 px-2 py-0.5 text-xs font-medium text-orange-600 border border-orange-200"
-                  >
-                    已绑定
-                  </span>
-                </div>
-             </div>
-
-             <div class="space-y-3 mb-4">
-                <div class="grid grid-cols-2 gap-4">
-                   <div>
-                      <p class="text-xs text-gray-400 mb-1">渠道</p>
-                      <Select
-                         :model-value="code.channel || 'common'"
-                         @update:modelValue="value => handleChannelChange(code, value)"
-                         :disabled="updatingChannelId === code.id"
-                       >
-                         <SelectTrigger class="w-full h-8 text-xs bg-gray-50 border-gray-200 rounded-lg">
-                           <SelectValue
-                             :display-text="code.channelName || getChannelLabel(code.channel)"
-                           />
-                         </SelectTrigger>
-                         <SelectContent>
-                           <SelectItem v-for="option in channelOptions" :key="option.value" :value="option.value">
-                             {{ option.label }}
-                         </SelectItem>
-                       </SelectContent>
-                     </Select>
-                   </div>
-                   <div>
-                      <p class="text-xs text-gray-400 mb-1">所属账号</p>
-	                      <button
-	                        v-if="code.accountEmail"
-	                        type="button"
-	                        class="w-full h-8 flex items-center px-3 gap-2 bg-gray-50 border border-gray-200 rounded-lg overflow-hidden hover:bg-white transition-colors disabled:opacity-60"
-	                        :disabled="syncingAccountEmail === code.accountEmail"
-	                        @click="handleSyncAccountByEmail(code.accountEmail)"
-	                      >
-		                        <div class="w-4 h-4 flex-shrink-0 rounded-full bg-white flex items-center justify-center text-[10px] text-gray-500 font-bold shadow-sm">
-		                          {{ code.accountEmail.charAt(0).toUpperCase() }}
-		                        </div>
-		                        <span class="text-xs truncate" :class="isCodeAccountBanned(code) ? 'text-red-600' : 'text-gray-700'">{{ code.accountEmail }}</span>
-		                        <RefreshCw class="w-3.5 h-3.5 text-gray-400 ml-auto" :class="{ 'animate-spin': syncingAccountEmail === code.accountEmail }" />
-		                      </button>
-                      <div v-else class="w-full h-8 flex items-center px-3 gap-2 bg-gray-50 border border-gray-200 rounded-lg overflow-hidden">
-                        <div class="w-4 h-4 flex-shrink-0 rounded-full bg-white flex items-center justify-center text-[10px] text-gray-500 font-bold shadow-sm">
-                          ?
-                        </div>
-                        <span class="text-xs text-gray-700 truncate">-</span>
-                      </div>
-                   </div>
-                </div>
-
-                <div v-if="getRedeemerDisplay(code) || hasPendingReservation(code)" class="bg-gray-50 p-3 rounded-xl">
-                   <div class="flex items-center justify-between">
-                      <span class="text-xs text-gray-400">兑换用户</span>
-                      <span
-                         v-if="hasPendingReservation(code)"
-                         class="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-0.5 text-[10px] font-medium text-orange-600 border border-orange-100"
-                      >
-                         待兑换
-                      </span>
-                   </div>
-                   <p
-                      class="text-sm font-medium text-gray-900 mt-1 truncate"
-                      :class="getRedeemerEmail(code) ? 'cursor-pointer hover:text-blue-600' : ''"
-                      :title="getRedeemerDisplay(code) || '-'"
-                      @click="getRedeemerEmail(code) ? handleCopyRedeemerEmail(code) : null"
-                   >
-                      {{ getRedeemerDisplay(code) || '-' }}
-                   </p>
-                   <span
-                      v-if="code.isRedeemed && !isExternalCode(code)"
-                      class="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600 mt-2"
-                   >
-                      {{ code.orderType === 'no_warranty' ? '无质保' : (code.orderType === 'anti_ban' ? '防封禁' : '质保') }}
-                   </span>
-                </div>
-                
-                <div class="flex items-center justify-between text-xs text-gray-400 pt-2 border-t border-gray-50">
-                   <span>创建时间</span>
-                   <span>{{ formatShanghaiDate(code.createdAt, dateFormatOptions).split(' ')[0] }}</span>
-                </div>
-             </div>
-
-	             <div class="flex items-center justify-end gap-2 pt-2 border-t border-gray-50">
-	                <Button
-	                   v-if="canCheckUpstreamCode(code)"
-	                   size="sm"
-	                   variant="outline"
-	                   class="h-9 text-xs border-sky-200 text-sky-600 hover:bg-sky-50"
-	                   @click="handleCheckUpstreamCode(code)"
-	                   :disabled="isCheckingUpstream(code.id)"
-	                >
-	                   <Search class="w-3.5 h-3.5 mr-1" :class="isCheckingUpstream(code.id) ? 'animate-spin' : ''" />
-	                   检查
-	                </Button>
-	                <Button
-	                   v-if="canReinviteCode(code)"
-	                   size="sm"
-	                   variant="outline"
-	                   class="h-9 text-xs border-blue-200 text-blue-600 hover:bg-blue-50"
-	                   @click="handleReinvite(code)"
-	                   :disabled="isReinviting(code.id)"
-	                >
-	                   <RefreshCcw class="w-3.5 h-3.5 mr-1" :class="isReinviting(code.id) ? 'animate-spin' : ''" />
-	                   重新邀请
-	                </Button>
-	                <Button
-	                   v-else-if="canRedeemCode(code)"
-	                   size="sm"
-	                   variant="outline"
-	                   class="h-9 text-xs border-green-200 text-green-600 hover:bg-green-50"
-	                   @click="openRedeemDialog(code)"
-	                >
-	                   <Ticket class="w-3.5 h-3.5 mr-1" />
-	                   兑换
-	                </Button>
-	                <Button 
-	                   size="sm" 
-	                   variant="ghost" 
-	                   class="h-9 w-9 p-0 text-gray-400 text-red-400 hover:text-red-600 hover:bg-red-50" 
-                   @click="handleDelete(code.id)"
-                >
-                   <Trash2 class="w-4 h-4"/>
-                </Button>
-             </div>
-          </div>
-        </div>
-
-        <!-- Footer -->
-        <div class="px-6 py-4 border-t border-gray-100 flex flex-col sm:flex-row items-center justify-between gap-4 bg-gray-50/30">
-           <div class="text-xs text-gray-500 font-medium">
-              共 {{ totalCodes }} 个兑换码
-           </div>
-           
-           <div v-if="totalPages > 1" class="flex items-center gap-1">
-              <Button
-                size="icon"
-                variant="outline"
-                class="h-8 w-8 rounded-lg border-gray-200"
-     :disabled="currentPage <= 1"
-                @click="goToPage(currentPage - 1)"
-              >
-                <ChevronLeft class="h-4 w-4" />
-              </Button>
-              <span class="text-sm font-medium text-gray-600 px-2">
-                {{ currentPage }} / {{ totalPages }}
-              </span>
-              <Button
-                size="icon"
-                variant="outline"
-                class="h-8 w-8 rounded-lg border-gray-200"
-                :disabled="currentPage >= totalPages"
-                @click="goToPage(currentPage + 1)"
-              >
-                <ChevronRight class="h-4 w-4" />
-              </Button>
-           </div>
-        </div>
+        <Button variant="outline" class="h-11 rounded-xl" @click="openImportExternalDialog">导入外部卡密</Button>
+        <Button class="h-11 rounded-xl bg-black hover:bg-gray-800 text-white" @click="openBatchDialog">
+          <Plus class="mr-2 h-4 w-4" />批量创建
+        </Button>
       </div>
     </div>
 
-    <!-- Sync Result Dialog -->
-    <Dialog v-model:open="showSyncResultDialog">
-      <DialogContent class="sm:max-w-[800px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl">
-        <div v-if="syncResult" class="flex flex-col h-[600px]">
-          <!-- Header -->
-          <div class="px-8 py-6 bg-green-50/50 border-b border-green-100 flex flex-col md:flex-row md:items-center justify-between gap-6 pr-12 relative">
-            <div>
-              <h3 class="text-xl font-bold text-green-900 flex items-center gap-2">
-                <span class="w-2 h-2 rounded-full bg-green-500"></span>
-                同步成功
-              </h3>
-              <p class="text-green-700/80 text-sm mt-1">{{ syncResult.message }}</p>
-              <p class="text-green-600/50 text-xs mt-2 flex items-center gap-1">
-                <span class="w-1 h-1 rounded-full bg-green-400"></span>
-                更新于 {{ formatShanghaiDate(syncResult.account.updatedAt, dateFormatOptions) }}
-              </p>
-            </div>
+    <div v-if="error" class="rounded-2xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">{{ error }}</div>
 
-            <div class="flex items-center gap-8 md:gap-12 border-t md:border-t-0 md:border-l border-green-200/50 pt-4 md:pt-0 md:pl-8">
-              <!-- 当前人数 -->
-              <div class="text-right">
-                <p class="text-xs font-medium text-green-600/60 uppercase tracking-wider mb-1">当前人数</p>
-                <div class="flex items-baseline gap-1 justify-end">
-                  <span v-if="previousUserCount !== null && previousUserCount !== syncResult.syncedUserCount" class="text-xl font-semibold text-green-600/40 mr-1">
-                    {{ previousUserCount }} <span class="text-sm mx-0.5">→</span>
-                  </span>
-                  <span class="text-3xl font-bold text-green-600">{{ syncResult.syncedUserCount }}</span>
-                  <span class="text-sm text-green-600 font-medium">人</span>
-                </div>
-              </div>
+    <div class="flex items-center justify-between rounded-2xl border border-gray-100 bg-gray-50/40 px-4 py-3 text-sm text-gray-600">
+      <div>当前共 {{ totalCodes }} 个兑换码，已选中 {{ selectedCodes.length }} 个</div>
+      <Button variant="outline" class="rounded-xl border-red-200 text-red-600" :disabled="!selectedCodes.length" @click="handleBatchDelete">
+        <Trash2 class="mr-2 h-4 w-4" />批量删除
+      </Button>
+    </div>
 
-              <!-- 待加入 -->
-              <div class="text-right">
-                <p class="text-xs font-medium text-green-600/60 uppercase tracking-wider mb-1">待加入人数</p>
-                <div class="flex items-baseline gap-1 justify-end">
-                  <span v-if="previousInviteCount !== null && previousInviteCount !== (syncResult.inviteCount ?? 0)" class="text-xl font-semibold text-green-600/40 mr-1">
-                    {{ previousInviteCount }} <span class="text-sm mx-0.5">→</span>
-                  </span>
-                  <span class="text-3xl font-bold text-green-600">{{ syncResult.inviteCount ?? 0 }}</span>
-                  <span class="text-sm text-green-600 font-medium">待</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Content -->
-          <div class="flex-1 overflow-y-auto p-8">
-            <div class="space-y-4">
-              <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <!-- Tabs -->
-                <div class="flex items-center gap-1 bg-gray-100 p-1 rounded-xl w-fit">
-                  <button
-                    @click="activeTab = 'members'"
-                    class="px-4 py-1.5 rounded-lg text-sm font-medium transition-all"
-                    :class="activeTab === 'members' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
-                  >
-                    成员列表
-                  </button>
-                  <button
-                    @click="activeTab = 'invites'"
-                    class="px-4 py-1.5 rounded-lg text-sm font-medium transition-all"
-                    :class="activeTab === 'invites' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'"
-                  >
-                    待加入列表
-                  </button>
-                </div>
-
-                <Button size="sm" variant="outline" class="rounded-lg text-xs h-8 border-gray-200" @click="showInviteForm = !showInviteForm">
-                  {{ showInviteForm ? '取消' : '邀请新成员' }}
-                </Button>
-              </div>
-
-              <!-- Invite Form -->
-              <div v-if="showInviteForm" class="p-4 bg-blue-50/50 rounded-xl border border-blue-100 animate-in fade-in slide-in-from-top-2">
-                <div class="flex gap-2">
-                  <Input v-model="inviteEmail" placeholder="输入邮箱地址..." class="bg-white h-10 border-blue-200 focus:border-blue-400" />
-                  <Button @click="handleInviteSubmit" :disabled="inviting" class="bg-blue-600 hover:bg-blue-700 text-white h-10 px-4 whitespace-nowrap">
-                    发送邀请
+    <div class="overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-sm">
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-100">
+          <thead class="bg-gray-50/70">
+            <tr>
+              <th class="px-4 py-4"><input type="checkbox" :checked="selectedCodes.length === codes.length && codes.length > 0" @change="handleSelectAllCodes" /></th>
+              <th class="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">兑换码</th>
+              <th class="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">账号</th>
+              <th class="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">渠道</th>
+              <th class="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">状态</th>
+              <th class="px-6 py-4 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">创建时间</th>
+              <th class="px-6 py-4 text-right text-xs font-semibold uppercase tracking-wider text-gray-500">操作</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <tr v-if="loading">
+              <td colspan="7" class="px-6 py-10 text-center text-sm text-gray-500">加载中...</td>
+            </tr>
+            <tr v-else-if="codes.length === 0">
+              <td colspan="7" class="px-6 py-10 text-center text-sm text-gray-500">暂无兑换码</td>
+            </tr>
+            <tr v-for="code in codes" :key="code.id" class="hover:bg-gray-50/60 transition-colors">
+              <td class="px-4 py-4"><input v-model="selectedCodes" type="checkbox" :value="code.id" /></td>
+              <td class="px-6 py-4">
+                <div class="font-mono text-sm font-semibold text-gray-900">{{ code.code }}</div>
+                <div v-if="code.redeemedBy" class="text-xs text-gray-500">{{ code.redeemedBy }}</div>
+              </td>
+              <td class="px-6 py-4 text-sm text-gray-700">{{ code.accountEmail || '-' }}</td>
+              <td class="px-6 py-4">
+                <select
+                  :value="code.channel"
+                  :disabled="updatingChannelId === code.id"
+                  class="h-10 rounded-xl border border-gray-200 bg-gray-50 px-3 text-sm"
+                  @change="handleCodeChannelSelect(code, $event)"
+                >
+                  <option v-for="channel in channelOptions" :key="channel.key" :value="channel.key">{{ channel.name }}</option>
+                </select>
+              </td>
+              <td class="px-6 py-4">
+                <span class="rounded-full px-2 py-1 text-xs border" :class="getCodeStatusClass(code)">
+                  {{ getCodeStatusLabel(code) }}
+                </span>
+              </td>
+              <td class="px-6 py-4 text-sm text-gray-500">{{ formatShanghaiDate(code.createdAt) }}</td>
+              <td class="px-6 py-4 text-right">
+                <div class="flex items-center justify-end gap-2">
+                  <Button v-if="!code.isRedeemed" variant="outline" class="rounded-xl" @click="openRedeemDialog(code)">
+                    <Ticket class="mr-2 h-4 w-4" />后台兑换
+                  </Button>
+                  <Button v-if="code.isRedeemed && code.fulfillmentMode !== 'external_api'" variant="outline" class="rounded-xl" :disabled="isReinviting(code.id)" @click="handleReinvite(code)">
+                    {{ isReinviting(code.id) ? '处理中...' : '重新邀请' }}
+                  </Button>
+                  <Button v-if="code.fulfillmentMode === 'external_api'" variant="outline" class="rounded-xl" :disabled="isCheckingUpstream(code.id)" @click="handleCheckUpstream(code)">
+                    {{ isCheckingUpstream(code.id) ? '检查中...' : '检查上游' }}
+                  </Button>
+                  <Button variant="outline" class="rounded-xl border-red-200 text-red-600" @click="handleDelete(code.id)">
+                    <Trash2 class="h-4 w-4" />
                   </Button>
                 </div>
-              </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
-              <!-- Members Table -->
-              <div v-show="activeTab === 'members'" class="border border-gray-100 rounded-xl overflow-hidden">
-                <table class="w-full text-sm">
-                  <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
-                    <tr>
-                      <th class="px-4 py-3 text-left font-medium">成员</th>
-                      <th class="px-4 py-3 text-left font-medium">角色</th>
-                      <th class="px-4 py-3 text-right font-medium">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-gray-50">
-                    <tr v-for="user in syncResult.users?.items" :key="user.id" class="group hover:bg-gray-50/50">
-                      <td class="px-4 py-3">
-                        <div class="font-medium text-gray-900">{{ user.name }}</div>
-                        <div class="text-xs text-gray-400">{{ user.email }}</div>
-                      </td>
-                      <td class="px-4 py-3 text-gray-500">
-                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 capitalize">
-                          {{ user.role }}
-                        </span>
-                      </td>
-                      <td class="px-4 py-3 text-right">
-                        <button
-                          v-if="!['account-owner', 'account-admin'].includes((user.role || '').toLowerCase())"
-                          class="text-gray-400 hover:text-red-600 transition-colors p-1 rounded hover:bg-red-50 disabled:opacity-50"
-                          @click="handleDeleteSyncedUser(user.id || user.account_user_id || '')"
-                          :disabled="deletingUserId === (user.id || user.account_user_id)"
-                        >
-                          <Trash2 class="w-4 h-4" />
-                        </button>
-                      </td>
-                    </tr>
-                    <tr v-if="!syncResult.users?.items?.length">
-                      <td colspan="3" class="px-4 py-8 text-center text-gray-400">暂无成员数据</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <!-- Invites Table -->
-              <div v-show="activeTab === 'invites'" class="border border-gray-100 rounded-xl overflow-hidden">
-                <div v-if="loadingInvites" class="p-8 flex justify-center">
-                  <div class="w-6 h-6 border-2 border-blue-500/20 border-t-blue-500 rounded-full animate-spin"></div>
-                </div>
-                <table v-else class="w-full text-sm">
-                  <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
-                    <tr>
-                      <th class="px-4 py-3 text-left font-medium">受邀邮箱</th>
-                      <th class="px-4 py-3 text-left font-medium">角色</th>
-                      <th class="px-4 py-3 text-left font-medium">邀请时间</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-gray-50">
-                    <tr v-for="invite in invitesList" :key="invite.id" class="group hover:bg-gray-50/50">
-                      <td class="px-4 py-3">
-                        <div class="font-medium text-gray-900">{{ invite.email_address }}</div>
-                      </td>
-                      <td class="px-4 py-3 text-gray-500">
-                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 capitalize">
-                          {{ invite.role }}
-                        </span>
-                      </td>
-                      <td class="px-4 py-3 text-gray-500 text-xs">
-                        {{ formatShanghaiDate(invite.created_time || '', dateFormatOptions) }}
-                      </td>
-                    </tr>
-                    <tr v-if="!invitesList.length">
-                      <td colspan="3" class="px-4 py-8 text-center text-gray-400">暂无待加入邀请</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-
-          <!-- Footer -->
-          <div class="px-8 py-4 border-t border-gray-100 bg-gray-50/50 flex justify-end">
-            <Button @click="closeSyncResultDialog" class="rounded-xl px-6 bg-white border border-gray-200 text-gray-700 hover:bg-gray-50">关闭</Button>
-          </div>
+      <div v-if="!loading" class="flex items-center justify-between border-t border-gray-100 px-6 py-4 text-sm text-gray-500 bg-gray-50/30">
+        <p>第 {{ currentPage }} / {{ totalPages }} 页，共 {{ totalCodes }} 个兑换码</p>
+        <div class="flex items-center gap-2">
+          <Button size="icon-sm" variant="outline" class="rounded-lg border-gray-200" :disabled="currentPage === 1" @click="goToPage(currentPage - 1)">
+            <ChevronLeft class="h-4 w-4" />
+          </Button>
+          <Button size="icon-sm" variant="outline" class="rounded-lg border-gray-200" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">
+            <ChevronRight class="h-4 w-4" />
+          </Button>
         </div>
+      </div>
+    </div>
 
-        <!-- Error State -->
-        <div v-else class="p-8 text-center space-y-6">
-          <div class="w-16 h-16 rounded-full bg-red-100 mx-auto flex items-center justify-center text-red-500">
-            <X class="w-8 h-8" />
-          </div>
-          <div>
-            <h3 class="text-xl font-bold text-gray-900">同步失败</h3>
-            <p class="text-gray-500 mt-2 max-w-sm mx-auto">{{ syncError }}</p>
-          </div>
-          <Button @click="closeSyncResultDialog" variant="outline" class="rounded-xl px-8">关闭</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-
-    <!-- Batch Generate Dialog -->
     <Dialog v-model:open="showBatchDialog">
-      <DialogContent class="sm:max-w-[500px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl">
-        <DialogHeader class="px-8 pt-8 pb-4">
-          <DialogTitle class="text-2xl font-bold text-gray-900">批量生成兑换码</DialogTitle>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>批量创建兑换码</DialogTitle>
         </DialogHeader>
-        
-        <div class="px-8 pb-8 space-y-6">
-           <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">所属账号</Label>
-              <Select v-model="selectedAccountEmail">
-                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500">
-                  <SelectValue placeholder="选择账号" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="account in accounts" :key="account.id" :value="account.email">
-                    {{ account.email }} (当前{{ account.userCount }}人)
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <p class="text-xs text-gray-400">
-                可创建数量 = 6 - 当前人数 - 未使用的兑换码数。
-              </p>
-           </div>
-
-           <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道</Label>
-                  <Select v-model="selectedBatchChannel">
-                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500">
-                  <SelectValue placeholder="选择渠道" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="channel in batchChannelOptions" :key="channel.value" :value="channel.value">
-                    {{ channel.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-           </div>
-           
-           <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">生成数量</Label>
-              <Input
-                v-model.number="batchCount"
-                type="number"
-                min="1"
-                max="1000"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
-              />
-           </div>
-        </div>
-
-        <DialogFooter class="px-8 pb-8 pt-0">
-           <Button variant="ghost" @click="closeBatchDialog" class="rounded-xl text-gray-500">取消</Button>
-           <Button @click="handleBatchCreate" :disabled="creating" class="rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 px-6">
-             {{ creating ? '生成中...' : '开始生成' }}
-           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-
-    <!-- Import External Dialog -->
-    <Dialog v-model:open="showImportExternalDialog">
-      <DialogContent class="sm:max-w-[560px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl">
-        <DialogHeader class="px-8 pt-8 pb-4">
-          <DialogTitle class="text-2xl font-bold text-gray-900">导入外部卡密</DialogTitle>
-        </DialogHeader>
-
-        <div class="px-8 pb-8 space-y-6">
+        <div class="space-y-4">
           <div class="space-y-2">
-            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">目标渠道</Label>
-            <Select v-model="importExternalChannel">
-              <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500">
-                <SelectValue placeholder="选择 external-card 渠道" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="channel in externalImportChannelOptions" :key="channel.value" :value="channel.value">
-                  {{ channel.label }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <p class="text-xs text-gray-400">仅展示兑换模式为 `external-card` 的渠道。</p>
+            <Label for="batch-account">所属账号</Label>
+            <select id="batch-account" v-model="selectedAccountEmail" class="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm">
+              <option value="">请选择账号</option>
+              <option v-for="account in accounts" :key="account.id" :value="account.email">{{ account.email }} (当前{{ account.userCount }}人)</option>
+            </select>
           </div>
-
           <div class="space-y-2">
-            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">卡密列表</Label>
-            <textarea
-              v-model="importExternalCodesText"
-              rows="10"
-              placeholder="每行一个卡密，支持任意非空字符串"
-              class="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm font-mono text-gray-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-            ></textarea>
-            <p class="text-xs text-gray-400">重复卡密会自动跳过并在导入结果中提示。</p>
+            <Label for="batch-channel">渠道</Label>
+            <select id="batch-channel" v-model="selectedBatchChannel" class="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm">
+              <option v-for="channel in batchChannelOptions" :key="channel.key" :value="channel.key">{{ channel.name }}</option>
+            </select>
+          </div>
+          <div class="space-y-2">
+            <Label for="batch-count">数量</Label>
+            <Input id="batch-count" v-model="batchCount" type="number" class="h-11 rounded-xl" />
           </div>
         </div>
-
-        <DialogFooter class="px-8 pb-8 pt-0">
-          <Button variant="ghost" @click="closeImportExternalDialog" class="rounded-xl text-gray-500">取消</Button>
-          <Button @click="handleImportExternal" :disabled="importingExternal" class="rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 px-6">
-            {{ importingExternal ? '导入中...' : '开始导入' }}
+        <DialogFooter>
+          <Button variant="outline" class="rounded-xl" @click="closeBatchDialog">取消</Button>
+          <Button class="rounded-xl bg-black hover:bg-gray-800 text-white" :disabled="creating" @click="handleBatchCreate">
+            {{ creating ? '创建中...' : '创建' }}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
 
-    <!-- Redeem Dialog -->
     <Dialog v-model:open="showRedeemDialog">
-      <DialogContent class="sm:max-w-[500px] p-0 overflow-hidden bg-white border-none shadow-2xl rounded-3xl">
-        <DialogHeader class="px-8 pt-8 pb-4">
-          <DialogTitle class="text-2xl font-bold text-gray-900">{{ redeemDialogTitle }}</DialogTitle>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>后台兑换</DialogTitle>
         </DialogHeader>
-        
-        <div class="px-8 pb-8 space-y-6">
-           <div v-if="redeemTargetCode" class="p-4 bg-blue-50 rounded-2xl border border-blue-100 space-y-2">
-              <div class="flex justify-between items-center">
-                 <span class="text-xs text-blue-600 font-semibold uppercase">Code</span>
-                 <span class="font-mono font-medium text-blue-900">{{ redeemTargetCode.code }}</span>
-              </div>
-              <div class="flex justify-between items-center">
-                 <span class="text-xs text-blue-600 font-semibold uppercase">{{ currentRedeemIsExternal ? 'Supplier' : 'Account' }}</span>
-                 <span
-                   class="font-medium"
-                   :class="!currentRedeemIsExternal && isCodeAccountBanned(redeemTargetCode) ? 'text-red-600' : 'text-blue-900'"
-                 >
-                   {{ currentRedeemIsExternal ? (getSupplierSummary(redeemTargetCode) || '未指定') : (redeemTargetCode.accountEmail || '未指定') }}
-                 </span>
-              </div>
-           </div>
-
-           <div v-if="!currentRedeemIsExternal" class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">订单类型</Label>
-              <Select v-model="redeemOrderType">
-                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500">
-                  <SelectValue placeholder="选择订单类型" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="option in orderTypeOptions" :key="option.value" :value="option.value">
-                    {{ option.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <p class="text-xs text-gray-400">无质保订单不支持退款与补号。</p>
-           </div>
-
-           <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">{{ currentRedeemIsExternal ? '目标邮箱' : '受邀邮箱' }}</Label>
-              <Input
-                v-model="redeemEmail"
-                type="email"
-                placeholder="name@example.com"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
-              />
-              <p class="text-xs text-gray-400">{{ redeemEmailHelperText }}</p>
-           </div>
+        <div class="space-y-4">
+          <div class="rounded-2xl border border-gray-100 bg-gray-50/40 px-4 py-3 text-sm text-gray-700">
+            兑换码：{{ redeemTargetCode?.code }}
+          </div>
+          <div class="space-y-2">
+            <Label for="redeem-email">邮箱</Label>
+            <Input id="redeem-email" v-model="redeemEmail" class="h-11 rounded-xl" placeholder="name@example.com" />
+          </div>
         </div>
-
-        <DialogFooter class="px-8 pb-8 pt-0">
-           <Button variant="ghost" @click="closeRedeemDialog" class="rounded-xl text-gray-500">取消</Button>
-           <Button @click="handleRedeemInvite" :disabled="redeeming" class="rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 px-6">
-             {{ redeemDialogActionLabel }}
-           </Button>
+        <DialogFooter>
+          <Button variant="outline" class="rounded-xl" @click="showRedeemDialog = false">取消</Button>
+          <Button class="rounded-xl bg-black hover:bg-gray-800 text-white" :disabled="redeeming" @click="handleRedeem">
+            {{ redeeming ? '兑换中...' : '确认兑换' }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
 
-    <!-- Text Popover (Legacy) -->
-    <div
-      v-if="showTextPopover"
-      class="fixed z-50 px-3 py-2 bg-gray-900/90 text-white text-xs rounded-lg pointer-events-none shadow-xl max-w-[280px] backdrop-blur-sm"
-      :style="{
-        top: `${popoverPosition.y - 12}px`,
-        left: `${popoverPosition.x}px`,
-        transform: 'translate(-50%, -100%)'
-      }"
-    >
-      <p class="text-[10px] uppercase tracking-widest text-gray-400 mb-1">已复制</p>
-      <p class="break-all leading-snug">{{ popoverText }}</p>
-    </div>
-
-    <div
-      v-if="showStatusTooltip"
-      class="fixed z-50 px-3 py-2 bg-gray-900/95 text-white rounded-lg pointer-events-none shadow-xl max-w-[280px] backdrop-blur-sm"
-      :style="{
-        top: `${statusTooltipPosition.y}px`,
-        left: `${statusTooltipPosition.x}px`,
-        transform: 'translate(-50%, -100%)'
-      }"
-    >
-      <p class="text-[10px] uppercase tracking-widest text-gray-400 mb-1">下游售出时间</p>
-      <p class="text-xs leading-snug whitespace-nowrap">{{ statusTooltipText }}</p>
-    </div>
+    <Dialog v-model:open="showImportExternalDialog">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>导入外部卡密</DialogTitle>
+        </DialogHeader>
+        <div class="space-y-4">
+          <div class="space-y-2">
+            <Label for="external-channel">渠道</Label>
+            <select id="external-channel" v-model="importExternalChannel" class="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm">
+              <option v-for="channel in externalImportChannelOptions" :key="channel.key" :value="channel.key">{{ channel.name }}</option>
+            </select>
+          </div>
+          <div class="space-y-2">
+            <Label for="external-codes">卡密列表</Label>
+            <textarea id="external-codes" v-model="importExternalCodesText" class="min-h-[220px] w-full rounded-2xl border border-gray-200 p-4 text-sm outline-none focus:ring-2 focus:ring-blue-100" placeholder="一行一个卡密" />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" class="rounded-xl" @click="showImportExternalDialog = false">取消</Button>
+          <Button class="rounded-xl bg-black hover:bg-gray-800 text-white" :disabled="importingExternal" @click="handleImportExternal">
+            {{ importingExternal ? '导入中...' : '导入' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

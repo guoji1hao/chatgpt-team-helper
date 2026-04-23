@@ -8,6 +8,8 @@ const router = express.Router()
 router.use(authenticateToken, requireSuperAdmin)
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/
+const ACCOUNT_CAPACITY = 6
+
 const toInt = (value, fallback) => {
   const parsed = Number.parseInt(String(value ?? ''), 10)
   return Number.isFinite(parsed) ? parsed : fallback
@@ -33,8 +35,7 @@ const resolveDateRange = (query) => {
   }
 
   const maxDays = 366
-  const maxDaysRaw = query?.maxDays
-  const maxDaysLimit = Math.max(1, toInt(maxDaysRaw, maxDays))
+  const maxDaysLimit = Math.max(1, toInt(query?.maxDays, maxDays))
   if (maxDaysLimit > 0) {
     const start = new Date(`${from}T00:00:00`)
     const end = new Date(`${to}T00:00:00`)
@@ -46,8 +47,6 @@ const resolveDateRange = (query) => {
 
   return { ok: true, from, to }
 }
-
-const ACCOUNT_CAPACITY = 6
 
 router.get('/overview', async (req, res) => {
   const range = resolveDateRange(req.query)
@@ -65,351 +64,120 @@ router.get('/overview', async (req, res) => {
       return value == null ? 0 : Number(value)
     }
 
-    const sumAmount = (sql, params = []) => {
-      const value = scalar(sql, params)
-      return Number.isFinite(value) ? value : 0
-    }
+    const userColumns = new Set((db.exec('PRAGMA table_info(users)')[0]?.values || []).map(row => String(row[1] || '')))
+    const hasInviteEnabled = userColumns.has('invite_enabled')
 
     const usersTotal = scalar('SELECT COUNT(*) FROM users')
-    const usersNew = scalar(
+    const usersCreated = scalar(
       `SELECT COUNT(*) FROM users WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
       [from, to]
     )
-    const usersPointsTotal = scalar(`SELECT COALESCE(SUM(COALESCE(points, 0)), 0) FROM users`)
-    const usersInviteEnabled = scalar(`SELECT COUNT(*) FROM users WHERE COALESCE(invite_enabled, 0) != 0`)
+    const usersInviteEnabled = hasInviteEnabled
+      ? scalar(`SELECT COUNT(*) FROM users WHERE COALESCE(invite_enabled, 0) != 0`)
+      : 0
 
-    const gptAccountsTotal = scalar('SELECT COUNT(*) FROM gpt_accounts')
-    const gptAccountsOpen = scalar(`SELECT COUNT(*) FROM gpt_accounts WHERE COALESCE(is_open, 0) = 1`)
-    const gptAccountsUsedSeats = scalar(`SELECT COALESCE(SUM(COALESCE(user_count, 0)), 0) FROM gpt_accounts`)
-    const gptAccountsInvitePending = scalar(`SELECT COALESCE(SUM(COALESCE(invite_count, 0)), 0) FROM gpt_accounts`)
-    const gptAccountsTotalSeats = gptAccountsTotal * ACCOUNT_CAPACITY
-    const gptAccountsSeatUtilization = gptAccountsTotalSeats > 0 ? gptAccountsUsedSeats / gptAccountsTotalSeats : 0
+    const accountsTotal = scalar('SELECT COUNT(*) FROM gpt_accounts')
+    const accountsOpen = scalar(`SELECT COUNT(*) FROM gpt_accounts WHERE COALESCE(is_open, 0) = 1`)
+    const accountsBanned = scalar(`SELECT COUNT(*) FROM gpt_accounts WHERE COALESCE(is_banned, 0) = 1`)
+    const accountsExpiringSoon = scalar(
+      `
+        SELECT COUNT(*)
+        FROM gpt_accounts
+        WHERE NULLIF(TRIM(COALESCE(expire_at, '')), '') IS NOT NULL
+          AND DATETIME(expire_at) >= DATETIME('now', 'localtime')
+          AND DATETIME(expire_at) <= DATETIME('now', 'localtime', '+7 days')
+      `
+    )
+    const usedSeats = scalar(`SELECT COALESCE(SUM(COALESCE(user_count, 0)), 0) FROM gpt_accounts`)
+    const invitePending = scalar(`SELECT COALESCE(SUM(COALESCE(invite_count, 0)), 0) FROM gpt_accounts`)
+    const totalSeats = accountsTotal * ACCOUNT_CAPACITY
+    const seatUtilization = totalSeats > 0 ? usedSeats / totalSeats : 0
+    const openAccountsOverCapacity = scalar(
+      `
+        SELECT COUNT(*)
+        FROM gpt_accounts
+        WHERE COALESCE(is_open, 0) = 1
+          AND COALESCE(is_banned, 0) = 0
+          AND COALESCE(user_count, 0) > ?
+      `,
+      [ACCOUNT_CAPACITY]
+    )
 
     const codesTotal = scalar('SELECT COUNT(*) FROM redemption_codes')
     const codesUnused = scalar(`SELECT COUNT(*) FROM redemption_codes WHERE COALESCE(is_redeemed, 0) = 0`)
-
-    const xhsCodesTodayTotal = scalar(
-      `
-        SELECT COUNT(*)
-        FROM redemption_codes
-        WHERE channel = 'xhs'
-          AND DATE(created_at) = DATE('now', 'localtime')
-      `
+    const codesRedeemed = scalar(`SELECT COUNT(*) FROM redemption_codes WHERE COALESCE(is_redeemed, 0) = 1`)
+    const codesCreated = scalar(
+      `SELECT COUNT(*) FROM redemption_codes WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
+      [from, to]
     )
-    const xhsCodesTodayUnused = scalar(
-      `
-        SELECT COUNT(*)
-        FROM redemption_codes
-        WHERE channel = 'xhs'
-          AND COALESCE(is_redeemed, 0) = 0
-          AND DATE(created_at) = DATE('now', 'localtime')
-      `
-    )
-    const xianyuCodesTodayTotal = scalar(
-      `
-        SELECT COUNT(*)
-        FROM redemption_codes
-        WHERE channel = 'xianyu'
-          AND DATE(created_at) = DATE('now', 'localtime')
-      `
-    )
-    const xianyuCodesTodayUnused = scalar(
-      `
-        SELECT COUNT(*)
-        FROM redemption_codes
-        WHERE channel = 'xianyu'
-          AND COALESCE(is_redeemed, 0) = 0
-          AND DATE(created_at) = DATE('now', 'localtime')
-      `
-    )
-    const commonCodesTodayTotal = scalar(
-      `
-        SELECT COUNT(*)
-        FROM redemption_codes
-        WHERE COALESCE(NULLIF(TRIM(channel), ''), 'common') = 'common'
-          AND DATE(created_at) = DATE('now', 'localtime')
-      `
-    )
-    const commonCodesTodayUnused = scalar(
-      `
-        SELECT COUNT(*)
-        FROM redemption_codes
-        WHERE COALESCE(NULLIF(TRIM(channel), ''), 'common') = 'common'
-          AND COALESCE(is_redeemed, 0) = 0
-          AND DATE(created_at) = DATE('now', 'localtime')
-      `
+    const codesRedeemedInRange = scalar(
+      `SELECT COUNT(*) FROM redemption_codes WHERE COALESCE(is_redeemed, 0) = 1 AND DATE(redeemed_at) BETWEEN DATE(?) AND DATE(?)`,
+      [from, to]
     )
 
     const codesByChannelResult = db.exec(
       `
         SELECT
-          COALESCE(channel, 'common') as channel,
-          COUNT(*) as total,
-          SUM(CASE WHEN COALESCE(is_redeemed, 0) = 0 THEN 1 ELSE 0 END) as unused
+          COALESCE(NULLIF(TRIM(channel), ''), 'common') AS channel,
+          COUNT(*) AS total,
+          SUM(CASE WHEN COALESCE(is_redeemed, 0) = 0 THEN 1 ELSE 0 END) AS unused,
+          SUM(CASE WHEN COALESCE(is_redeemed, 0) = 1 THEN 1 ELSE 0 END) AS redeemed
         FROM redemption_codes
-        GROUP BY COALESCE(channel, 'common')
-        ORDER BY total DESC
+        GROUP BY COALESCE(NULLIF(TRIM(channel), ''), 'common')
+        ORDER BY total DESC, channel ASC
       `
     )
-    const codesByChannel = (codesByChannelResult?.[0]?.values || []).map(row => ({
+    const byChannel = (codesByChannelResult?.[0]?.values || []).map(row => ({
       channel: String(row[0] || 'common'),
       total: Number(row[1] || 0),
       unused: Number(row[2] || 0),
+      redeemed: Number(row[3] || 0),
     }))
 
-    const xhsOrdersTotal = scalar('SELECT COUNT(*) FROM xhs_orders')
-    const xhsOrdersUsed = scalar(`SELECT COUNT(*) FROM xhs_orders WHERE COALESCE(is_used, 0) = 1`)
-    const xhsOrdersPending = Math.max(0, xhsOrdersTotal - xhsOrdersUsed)
-    const xhsOrdersTodayTotal = scalar(
+    const recentRedeemsResult = db.exec(
       `
-        SELECT COUNT(*)
-        FROM xhs_orders
-        WHERE DATE(REPLACE(COALESCE(NULLIF(TRIM(order_time), ''), created_at), '/', '-')) = DATE('now', 'localtime')
-      `
-    )
-	    const xhsOrdersTodayUsed = scalar(
-	      `
-	        SELECT COUNT(*)
-	        FROM xhs_orders
-	        WHERE COALESCE(is_used, 0) = 1
-	          AND DATE(REPLACE(COALESCE(NULLIF(TRIM(order_time), ''), created_at), '/', '-')) = DATE('now', 'localtime')
-	      `
-	    )
-	    const xhsOrdersTodayPending = Math.max(0, xhsOrdersTodayTotal - xhsOrdersTodayUsed)
-	    const xhsOrdersAmountRange = sumAmount(
-	      `
-	        SELECT COALESCE(SUM(COALESCE(actual_paid, 0)), 0)
-	        FROM xhs_orders
-	        WHERE COALESCE(order_status, '') != '已关闭'
-	          AND DATE(REPLACE(COALESCE(NULLIF(TRIM(order_time), ''), created_at), '/', '-')) BETWEEN DATE(?) AND DATE(?)
-	      `,
-	      [from, to]
-	    )
-    const xhsOrdersAmountToday = sumAmount(
-      `
-	        SELECT COALESCE(SUM(COALESCE(actual_paid, 0)), 0)
-	        FROM xhs_orders
-	        WHERE COALESCE(order_status, '') != '已关闭'
-	          AND DATE(REPLACE(COALESCE(NULLIF(TRIM(order_time), ''), created_at), '/', '-')) = DATE('now', 'localtime')
-	      `
-	    )
-
-    const xianyuOrdersTotal = scalar('SELECT COUNT(*) FROM xianyu_orders')
-    const xianyuOrdersUsed = scalar(`SELECT COUNT(*) FROM xianyu_orders WHERE COALESCE(is_used, 0) = 1`)
-    const xianyuOrdersPending = Math.max(0, xianyuOrdersTotal - xianyuOrdersUsed)
-    const xianyuOrdersTodayTotal = scalar(
-      `
-        SELECT COUNT(*)
-        FROM xianyu_orders
-        WHERE DATE(created_at) = DATE('now', 'localtime')
+        SELECT code, redeemed_by, account_email, COALESCE(NULLIF(TRIM(channel), ''), 'common') AS channel, redeemed_at
+        FROM redemption_codes
+        WHERE COALESCE(is_redeemed, 0) = 1
+        ORDER BY DATETIME(COALESCE(redeemed_at, updated_at, created_at)) DESC
+        LIMIT 10
       `
     )
-    const xianyuOrdersTodayUsed = scalar(
-      `
-        SELECT COUNT(*)
-        FROM xianyu_orders
-        WHERE COALESCE(is_used, 0) = 1
-          AND DATE(created_at) = DATE('now', 'localtime')
-      `
-    )
-    const xianyuOrdersTodayPending = Math.max(0, xianyuOrdersTodayTotal - xianyuOrdersTodayUsed)
-    const xianyuOrdersAmountRange = sumAmount(
-      `
-        SELECT COALESCE(SUM(COALESCE(actual_paid, 0)), 0)
-        FROM xianyu_orders
-        WHERE COALESCE(order_status, '') NOT LIKE '%关闭%'
-          AND DATE(created_at) BETWEEN DATE(?) AND DATE(?)
-      `,
-      [from, to]
-    )
-    const xianyuOrdersAmountToday = sumAmount(
-      `
-        SELECT COALESCE(SUM(COALESCE(actual_paid, 0)), 0)
-        FROM xianyu_orders
-        WHERE COALESCE(order_status, '') NOT LIKE '%关闭%'
-          AND DATE(created_at) = DATE('now', 'localtime')
-      `
-    )
-
-	    const purchaseOrdersTotal = scalar(
-	      `SELECT COUNT(*) FROM purchase_orders WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
-	      [from, to]
-    )
-    const purchaseOrdersPaid = scalar(
-      `SELECT COUNT(*) FROM purchase_orders WHERE status = 'paid' AND DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
-      [from, to]
-    )
-    const purchaseOrdersPending = scalar(
-      `SELECT COUNT(*) FROM purchase_orders WHERE status IN ('created', 'pending_payment') AND DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
-      [from, to]
-    )
-    const purchaseOrdersRefunded = scalar(
-      `SELECT COUNT(*) FROM purchase_orders WHERE status = 'refunded' AND DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
-      [from, to]
-    )
-    const purchaseOrdersPaidAmount = sumAmount(
-      `
-        SELECT COALESCE(SUM(CASE WHEN status = 'paid' THEN CAST(amount AS REAL) ELSE 0 END), 0)
-        FROM purchase_orders
-        WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)
-      `,
-      [from, to]
-    )
-    const purchaseOrdersRefundAmount = sumAmount(
-      `
-        SELECT COALESCE(SUM(CASE WHEN status = 'refunded' THEN CAST(COALESCE(refund_amount, amount) AS REAL) ELSE 0 END), 0)
-        FROM purchase_orders
-        WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)
-      `,
-      [from, to]
-    )
-
-    const purchaseOrdersTodayTotal = scalar(
-      `SELECT COUNT(*) FROM purchase_orders WHERE DATE(created_at) = DATE('now', 'localtime')`
-    )
-    const purchaseOrdersTodayPaid = scalar(
-      `SELECT COUNT(*) FROM purchase_orders WHERE status = 'paid' AND DATE(created_at) = DATE('now', 'localtime')`
-    )
-    const purchaseOrdersTodayPending = scalar(
-      `SELECT COUNT(*) FROM purchase_orders WHERE status IN ('created', 'pending_payment') AND DATE(created_at) = DATE('now', 'localtime')`
-    )
-    const purchaseOrdersTodayRefunded = scalar(
-      `SELECT COUNT(*) FROM purchase_orders WHERE status = 'refunded' AND DATE(created_at) = DATE('now', 'localtime')`
-    )
-    const purchaseOrdersTodayPaidAmount = sumAmount(
-      `
-        SELECT COALESCE(SUM(CASE WHEN status = 'paid' THEN CAST(amount AS REAL) ELSE 0 END), 0)
-        FROM purchase_orders
-        WHERE DATE(created_at) = DATE('now', 'localtime')
-      `
-    )
-    const purchaseOrdersTodayRefundAmount = sumAmount(
-      `
-        SELECT COALESCE(SUM(CASE WHEN status = 'refunded' THEN CAST(COALESCE(refund_amount, amount) AS REAL) ELSE 0 END), 0)
-        FROM purchase_orders
-        WHERE DATE(created_at) = DATE('now', 'localtime')
-      `
-    )
-
-    const creditOrdersTotal = scalar(
-      `SELECT COUNT(*) FROM credit_orders WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
-      [from, to]
-    )
-    const creditOrdersPaid = scalar(
-      `SELECT COUNT(*) FROM credit_orders WHERE status = 'paid' AND DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
-      [from, to]
-    )
-    const creditOrdersRefunded = scalar(
-      `SELECT COUNT(*) FROM credit_orders WHERE status = 'refunded' AND DATE(created_at) BETWEEN DATE(?) AND DATE(?)`,
-      [from, to]
-    )
-    const creditOrdersPaidAmount = sumAmount(
-      `
-        SELECT COALESCE(SUM(CASE WHEN status = 'paid' THEN CAST(amount AS REAL) ELSE 0 END), 0)
-        FROM credit_orders
-        WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)
-      `,
-      [from, to]
-    )
-
-    const pointsWithdrawalsPending = scalar(
-      `SELECT COUNT(*) FROM points_withdrawals WHERE status = 'pending'`
-    )
-    const pointsWithdrawalsPendingPoints = scalar(
-      `SELECT COALESCE(SUM(COALESCE(points, 0)), 0) FROM points_withdrawals WHERE status = 'pending'`
-    )
-    const pointsWithdrawalsPendingCash = sumAmount(
-      `SELECT COALESCE(SUM(CAST(COALESCE(cash_amount, '0') AS REAL)), 0) FROM points_withdrawals WHERE status = 'pending'`
-    )
+    const recentRedeems = (recentRedeemsResult?.[0]?.values || []).map(row => ({
+      code: String(row[0] || ''),
+      redeemedBy: row[1] ? String(row[1]) : null,
+      accountEmail: row[2] ? String(row[2]) : null,
+      channel: String(row[3] || 'common'),
+      redeemedAt: row[4] ? String(row[4]) : null,
+    }))
 
     res.json({
       range: { from, to },
       users: {
         total: usersTotal,
-        created: usersNew,
-        pointsTotal: usersPointsTotal,
+        created: usersCreated,
         inviteEnabled: usersInviteEnabled,
       },
       gptAccounts: {
-        total: gptAccountsTotal,
-        open: gptAccountsOpen,
-        usedSeats: gptAccountsUsedSeats,
-        totalSeats: gptAccountsTotalSeats,
-        seatUtilization: gptAccountsSeatUtilization,
-        invitePending: gptAccountsInvitePending,
+        total: accountsTotal,
+        open: accountsOpen,
+        banned: accountsBanned,
+        expiringSoon: accountsExpiringSoon,
+        usedSeats,
+        totalSeats,
+        seatUtilization,
+        invitePending,
+        openAccountsOverCapacity,
       },
       redemptionCodes: {
         total: codesTotal,
         unused: codesUnused,
-        byChannel: codesByChannel,
-        todayCommon: {
-          total: commonCodesTodayTotal,
-          unused: commonCodesTodayUnused,
-        },
-        todayXhs: {
-          total: xhsCodesTodayTotal,
-          unused: xhsCodesTodayUnused,
-        },
-        todayXianyu: {
-          total: xianyuCodesTodayTotal,
-          unused: xianyuCodesTodayUnused,
-        },
+        redeemed: codesRedeemed,
+        created: codesCreated,
+        redeemedInRange: codesRedeemedInRange,
+        byChannel,
       },
-	      xhsOrders: {
-	        total: xhsOrdersTotal,
-	        used: xhsOrdersUsed,
-	        pending: xhsOrdersPending,
-	        amount: {
-	          range: xhsOrdersAmountRange,
-	          today: xhsOrdersAmountToday,
-	        },
-	        today: {
-	          total: xhsOrdersTodayTotal,
-	          used: xhsOrdersTodayUsed,
-	          pending: xhsOrdersTodayPending,
-	        }
-	      },
-      xianyuOrders: {
-        total: xianyuOrdersTotal,
-        used: xianyuOrdersUsed,
-        pending: xianyuOrdersPending,
-        amount: {
-          range: xianyuOrdersAmountRange,
-          today: xianyuOrdersAmountToday,
-        },
-        today: {
-          total: xianyuOrdersTodayTotal,
-          used: xianyuOrdersTodayUsed,
-          pending: xianyuOrdersTodayPending,
-        }
-      },
-      purchaseOrders: {
-        total: purchaseOrdersTotal,
-        paid: purchaseOrdersPaid,
-        pending: purchaseOrdersPending,
-        refunded: purchaseOrdersRefunded,
-        paidAmount: purchaseOrdersPaidAmount,
-        refundAmount: purchaseOrdersRefundAmount,
-        today: {
-          total: purchaseOrdersTodayTotal,
-          paid: purchaseOrdersTodayPaid,
-          pending: purchaseOrdersTodayPending,
-          refunded: purchaseOrdersTodayRefunded,
-          paidAmount: purchaseOrdersTodayPaidAmount,
-          refundAmount: purchaseOrdersTodayRefundAmount,
-        }
-      },
-      creditOrders: {
-        total: creditOrdersTotal,
-        paid: creditOrdersPaid,
-        refunded: creditOrdersRefunded,
-        paidAmount: creditOrdersPaidAmount,
-      },
-      pointsWithdrawals: {
-        pending: pointsWithdrawalsPending,
-        pendingPoints: pointsWithdrawalsPendingPoints,
-        pendingCash: pointsWithdrawalsPendingCash,
-      }
+      recentRedeems,
     })
   } catch (error) {
     console.error('[Admin Stats] overview error:', error)

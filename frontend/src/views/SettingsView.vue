@@ -1,8 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
-import { authService, userService, adminService, versionService, purchaseService } from '@/services/api'
-import type { AdminProxyTestResult, VersionInfo, LatestVersionInfo, Channel, PurchaseProduct, PurchaseMeta, PurchaseOrderType } from '@/services/api'
-import { useAppConfigStore } from '@/stores/appConfig'
+import { onMounted, ref } from 'vue'
+import { adminService, userService, type Channel, type AdminProxyTestResult } from '@/services/api'
 import {
   Card,
   CardContent,
@@ -13,155 +11,39 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import AnnouncementAdminPanel from '@/components/AnnouncementAdminPanel.vue'
-import InfoTooltip from '@/components/InfoTooltip.vue'
-import { Eye, EyeOff, Sparkles, KeyRound, AlertCircle, CheckCircle2, RefreshCw, Settings, CreditCard, Link, Mail, Shield, Plus, Trash2 } from 'lucide-vue-next'
+import { useToast } from '@/components/ui/toast'
 
-const teleportReady = ref(false)
-const activeTab = ref<'settings' | 'announcements'>('settings')
-type SettingsModuleId = 'general' | 'billing' | 'integrations' | 'upstream' | 'notifications' | 'security'
-type SettingsResourceKey =
-  | 'apiKey'
-  | 'featureFlags'
-  | 'accountRecovery'
-  | 'channels'
-  | 'purchaseProducts'
-  | 'downstreamSale'
-  | 'emailWhitelist'
-  | 'pointsWithdraw'
-  | 'smtp'
-  | 'linuxdoOauth'
-  | 'linuxdoCredit'
-  | 'zpay'
-  | 'turnstile'
-  | 'telegram'
-  | 'proxy'
-  | 'upstream'
+const { success: showSuccessToast, error: showErrorToast, info: showInfoToast } = useToast()
 
-const settingsSubTab = ref<SettingsModuleId>('general')
-
-const settingsNav = [
-  { id: 'general', label: '基础设置', desc: '功能开关、白名单与补录', icon: Settings },
-  { id: 'billing', label: '支付与财务', desc: '商品、支付通道与提现', icon: CreditCard },
-  { id: 'integrations', label: '第三方集成', desc: 'OAuth、验证与机器人', icon: Link },
-  { id: 'upstream', label: '上下游接口配置', desc: '出站履约与入站鉴权', icon: RefreshCw },
-  { id: 'notifications', label: '邮件与通知', desc: 'SMTP 告警邮件配置', icon: Mail },
-  { id: 'security', label: '核心与安全', desc: 'API 密钥、渠道与网络', icon: Shield },
-] as const
-
-const activeNavItem = computed(() => settingsNav.find(n => n.id === settingsSubTab.value))
-const settingsResourceLoaded = ref<Record<SettingsResourceKey, boolean>>({
-  apiKey: false,
-  featureFlags: false,
-  accountRecovery: false,
-  channels: false,
-  purchaseProducts: false,
-  downstreamSale: false,
-  emailWhitelist: false,
-  pointsWithdraw: false,
-  smtp: false,
-  linuxdoOauth: false,
-  linuxdoCredit: false,
-  zpay: false,
-  turnstile: false,
-  telegram: false,
-  proxy: false,
-  upstream: false,
-})
-const settingsResourcePromises = new Map<SettingsResourceKey, Promise<void>>()
-
-// 版本检查相关
-const versionLoading = ref(false)
-const versionDialogOpen = ref(false)
-const currentVersion = ref<VersionInfo | null>(null)
-const latestVersion = ref<LatestVersionInfo | null>(null)
-const versionError = ref('')
-
-const hasNewVersion = computed(() => {
-  if (!currentVersion.value || !latestVersion.value) return false
-  return currentVersion.value.version !== latestVersion.value.version
-})
-
-const checkForUpdates = async () => {
-  versionLoading.value = true
-  versionError.value = ''
-  currentVersion.value = null
-  latestVersion.value = null
-
-  try {
-    const [current, latest] = await Promise.all([
-      versionService.getVersion(),
-      versionService.getLatest().catch(err => {
-        if (err.response?.status === 404) {
-          return null
-        }
-        throw err
-      })
-    ])
-    currentVersion.value = current
-    latestVersion.value = latest
-    versionDialogOpen.value = true
-  } catch (err: any) {
-    versionError.value = err.response?.data?.error || '检查更新失败'
-    versionDialogOpen.value = true
-  } finally {
-    versionLoading.value = false
-  }
-}
-
-// API密钥相关
 const apiKey = ref('')
-const apiKeyError = ref('')
-const apiKeySuccess = ref('')
 const apiKeyLoading = ref(false)
-const showApiKey = ref(false) // 控制显示/隐藏API密钥
+const apiKeyConfigured = ref(false)
 
-const isSuperAdmin = computed(() => {
-  const user = authService.getCurrentUser()
-  return Array.isArray(user?.roles) && user.roles.includes('super_admin')
-})
+const emailDomainWhitelist = ref('')
+const emailWhitelistLoading = ref(false)
 
-const appConfigStore = useAppConfigStore()
+const turnstileSiteKey = ref('')
+const turnstileSecretKey = ref('')
+const turnstileLoading = ref(false)
+const turnstileSecretSet = ref(false)
+const turnstileEnabled = ref(false)
 
-// 功能开关（仅超级管理员）
-const featureFlags = ref({
-  xhs: true,
-  xianyu: true,
-  payment: true,
-  openAccounts: true
-})
-const featureFlagsError = ref('')
-const featureFlagsSuccess = ref('')
-const featureFlagsLoading = ref(false)
+const telegramAllowedUserIds = ref('')
+const telegramBotToken = ref('')
+const telegramNotifyEnabled = ref(true)
+const telegramNotifyChatIds = ref('')
+const telegramNotifyTimeoutMs = ref('8000')
+const telegramLoading = ref(false)
+const telegramTokenSet = ref(false)
 
-// 补录设置（仅超级管理员）
-const accountRecoveryForceTodayCodes = ref(false)
-const accountRecoveryCodeWindowDays = ref('7')
-const accountRecoveryRequireExpireCoverDeadline = ref(false)
-const accountRecoverySettingsError = ref('')
-const accountRecoverySettingsSuccess = ref('')
-const accountRecoverySettingsLoading = ref(false)
+const proxyUrls = ref('')
+const proxyLoading = ref(false)
+const proxyEffectiveCount = ref(0)
+const proxyTestResults = ref<AdminProxyTestResult[]>([])
+const proxyTesting = ref(false)
 
-// 渠道管理（仅超级管理员）
 const channels = ref<Channel[]>([])
 const channelsLoading = ref(false)
-const channelsError = ref('')
-const channelsSuccess = ref('')
 const channelDialogOpen = ref(false)
 const channelDialogMode = ref<'create' | 'edit'>('create')
 const channelFormKey = ref('')
@@ -169,454 +51,158 @@ const channelFormName = ref('')
 const channelFormRedeemMode = ref('code')
 const channelFormProviderType = ref('local')
 const channelFormAllowFallback = ref(false)
-const channelFormAllowDownstreamSale = ref(false)
 const channelFormIsActive = ref(true)
 const channelFormSortOrder = ref('0')
-const channelRedeemModeOptions = [
-  { value: 'code', label: '站内兑换码' },
-  { value: 'linux-do', label: 'Linux DO' },
-  { value: 'xhs', label: '小红书' },
-  { value: 'xianyu', label: '闲鱼' },
-  { value: 'external-card', label: '上游卡密' }
-]
-const channelProviderTypeOptions = [
-  { value: 'local', label: '本地履约' },
-  { value: 'custom-http', label: '自定义接口' },
-  { value: 'platform-upstream', label: '平台通用接口' }
-]
-const channelFormProviderOptions = computed(() => (
-  channelFormRedeemMode.value === 'external-card'
-    ? channelProviderTypeOptions.filter(option => option.value !== 'local')
-    : channelProviderTypeOptions.filter(option => option.value === 'local')
-))
-
-// 支付商品管理（仅超级管理员）
-const purchaseProducts = ref<PurchaseProduct[]>([])
-const purchaseProductsLoading = ref(false)
-const purchaseProductsError = ref('')
-const purchaseProductsSuccess = ref('')
-const purchaseProductDialogOpen = ref(false)
-const purchaseProductDialogMode = ref<'create' | 'edit'>('create')
-const purchaseProductFormKey = ref('')
-const purchaseProductFormName = ref('')
-const purchaseProductFormAmount = ref('')
-const purchaseProductFormServiceDays = ref('30')
-const purchaseProductFormOrderType = ref<PurchaseOrderType>('warranty')
-const purchaseProductFormCodeChannels = ref('')
-const purchaseProductFormIsActive = ref(true)
-const purchaseProductFormSortOrder = ref('0')
-const purchaseAvailability = ref<Record<string, number>>({})
-
-// 邮箱后缀白名单
-const emailDomainWhitelist = ref('')
-const emailDomainWhitelistError = ref('')
-const emailDomainWhitelistSuccess = ref('')
-const emailDomainWhitelistLoading = ref(false)
-
-// 积分提现设置（仅超级管理员）
-const pointsWithdrawRatePoints = ref('1')
-const pointsWithdrawRateCashYuan = ref('1.00')
-const pointsWithdrawMinCashYuan = ref('10.00')
-const pointsWithdrawMinPoints = ref<number | null>(null)
-const pointsWithdrawStepPoints = ref<number | null>(null)
-const pointsWithdrawError = ref('')
-const pointsWithdrawSuccess = ref('')
-const pointsWithdrawLoading = ref(false)
-
-// SMTP 邮件告警配置（仅超级管理员）
-const smtpHost = ref('')
-const smtpPort = ref('465')
-const smtpSecure = ref<'true' | 'false'>('true')
-const smtpUser = ref('')
-const smtpPass = ref('')
-const smtpPassSet = ref(false)
-const smtpPassStored = ref(false)
-const smtpFrom = ref('')
-const adminAlertEmail = ref('')
-const smtpError = ref('')
-const smtpSuccess = ref('')
-const smtpLoading = ref(false)
-const showSmtpPass = ref(false)
-
-// Linux DO OAuth 配置（仅超级管理员）
-const linuxdoClientId = ref('')
-const linuxdoClientSecret = ref('')
-const linuxdoRedirectUri = ref('')
-const linuxdoClientSecretSet = ref(false)
-const linuxdoClientSecretStored = ref(false)
-const linuxdoOauthError = ref('')
-const linuxdoOauthSuccess = ref('')
-const linuxdoOauthLoading = ref(false)
-const showLinuxdoClientSecret = ref(false)
-
-// Linux DO Credit 配置（仅超级管理员）
-const linuxdoCreditPid = ref('')
-const linuxdoCreditKey = ref('')
-const linuxdoCreditKeySet = ref(false)
-const linuxdoCreditKeyStored = ref(false)
-const linuxdoCreditError = ref('')
-const linuxdoCreditSuccess = ref('')
-const linuxdoCreditLoading = ref(false)
-const showLinuxdoCreditKey = ref(false)
-
-// ZPAY 支付配置（仅超级管理员）
-const zpayBaseUrl = ref('https://zpayz.cn')
-const zpayPid = ref('')
-const zpayKey = ref('')
-const zpayKeySet = ref(false)
-const zpayKeyStored = ref(false)
-const zpayError = ref('')
-const zpaySuccess = ref('')
-const zpayLoading = ref(false)
-const showZpayKey = ref(false)
-
-// 下游售码配置（仅超级管理员）
-const downstreamSaleEnabled = ref(false)
-const downstreamSaleProductName = ref('')
-const downstreamSaleAmount = ref('9.90')
-const downstreamSalePayAlipayEnabled = ref(true)
-const downstreamSalePayWxpayEnabled = ref(false)
-const downstreamSaleError = ref('')
-const downstreamSaleSuccess = ref('')
-const downstreamSaleLoading = ref(false)
-
-// Cloudflare Turnstile 配置（仅超级管理员）
-const turnstileSiteKey = ref('')
-const turnstileSecretKey = ref('')
-const turnstileEnabled = ref(false)
-const turnstileSecretSet = ref(false)
-const turnstileSecretStored = ref(false)
-const turnstileSiteKeyStored = ref(false)
-const turnstileError = ref('')
-const turnstileSuccess = ref('')
-const turnstileLoading = ref(false)
-const showTurnstileSecretKey = ref(false)
-
-// Telegram Bot 配置（仅超级管理员）
-const telegramAllowedUserIds = ref('')
-const telegramAllowedUserIdsStored = ref(false)
-const telegramBotToken = ref('')
-const telegramTokenSet = ref(false)
-const telegramTokenStored = ref(false)
-const telegramNotifyEnabled = ref<'true' | 'false'>('true')
-const telegramNotifyEnabledStored = ref(false)
-const telegramNotifyChatIds = ref('')
-const telegramNotifyChatIdsStored = ref(false)
-const telegramNotifyTimeoutMs = ref('8000')
-const telegramNotifyTimeoutMsStored = ref(false)
-const telegramError = ref('')
-const telegramSuccess = ref('')
-const telegramLoading = ref(false)
-const showTelegramBotToken = ref(false)
-
-// 全局代理配置（仅超级管理员）
-type ProxyRow = {
-  id: string
-  value: string
-}
-
-const createProxyRow = (value: string = ''): ProxyRow => ({
-  id: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-  value,
-})
-
-const proxyStored = ref(false)
-const proxyEffectiveCount = ref(0)
-const proxyError = ref('')
-const proxySuccess = ref('')
-const proxyLoading = ref(false)
-const proxyTesting = ref(false)
-const proxyTestTotal = ref(0)
-const proxyTestPassed = ref(0)
-const proxyTestFailed = ref(0)
-const proxyTestResults = ref<AdminProxyTestResult[]>([])
-const proxyRows = ref<ProxyRow[]>([createProxyRow()])
-const proxyLastTestedProxyUrls = ref('')
-const parseProxyEntries = (value?: string | null) => (
-  String(value || '')
-    .split(/[\n,;]+/g)
-    .map(item => item.trim())
-    .filter(Boolean)
-)
-const buildProxyLookupKeys = (value?: string | null) => {
-  const raw = String(value || '').trim()
-  if (!raw) return []
-  const keys = new Set<string>([raw])
-  try {
-    const parsed = new URL(raw)
-    const protocol = String(parsed.protocol || '').replace(':', '').toLowerCase()
-    const auth = parsed.username
-      ? `${parsed.username}${parsed.password ? `:${parsed.password}` : ''}@`
-      : ''
-    const host = (parsed.hostname || '').toLowerCase()
-    const port = parsed.port ? `:${parsed.port}` : ''
-    const pathname = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : ''
-    const search = parsed.search || ''
-    const hash = parsed.hash || ''
-    keys.add(`${protocol}://${auth}${host}${port}${pathname}${search}${hash}`)
-    keys.add(`${protocol}://${host}${port}${pathname}${search}${hash}`)
-    keys.add(`${protocol}://${host}${port}`)
-  } catch {
-    return Array.from(keys)
-  }
-  return Array.from(keys)
-}
-const setProxyRowsFromText = (value?: string | null) => {
-  const entries = parseProxyEntries(value)
-  proxyRows.value = entries.length > 0
-    ? entries.map(entry => createProxyRow(entry))
-    : [createProxyRow()]
-}
-const proxyDraftProxyUrls = computed(() => (
-  proxyRows.value
-    .map(row => row.value.trim())
-    .filter(Boolean)
-    .join('\n')
-))
-const proxyDraftCount = computed(() => (
-  proxyRows.value.filter(row => row.value.trim()).length
-))
-const proxyResultLookup = computed(() => {
-  const lookup = new Map<string, AdminProxyTestResult>()
-  for (const result of proxyTestResults.value) {
-    for (const key of buildProxyLookupKeys(result.proxy)) {
-      lookup.set(key, result)
-    }
-  }
-  return lookup
-})
-const getProxyRowResult = (value?: string | null) => {
-  for (const key of buildProxyLookupKeys(value)) {
-    const result = proxyResultLookup.value.get(key)
-    if (result) return result
-  }
-  return null
-}
-const resetProxyTestState = () => {
-  proxyTestTotal.value = 0
-  proxyTestPassed.value = 0
-  proxyTestFailed.value = 0
-  proxyTestResults.value = []
-  proxyLastTestedProxyUrls.value = ''
-}
-const addProxyRow = () => {
-  proxyRows.value = [...proxyRows.value, createProxyRow()]
-}
-const removeProxyRow = (index: number) => {
-  if (proxyRows.value.length <= 1) {
-    proxyRows.value = [createProxyRow()]
-    return
-  }
-  proxyRows.value = proxyRows.value.filter((_, currentIndex) => currentIndex !== index)
-}
-
-watch(proxyDraftProxyUrls, (next, previous) => {
-  if (next === previous) return
-  if (next !== proxyLastTestedProxyUrls.value) {
-    resetProxyTestState()
-  }
-})
-
-// 上游履约配置（仅超级管理员）
-type UpstreamInboundClientRow = {
-  id: string
-  domain: string
-  apiKey: string
-  apiKeySet: boolean
-  apiKeyStored: boolean
-  legacy: boolean
-  showApiKey: boolean
-}
-
-const DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE = JSON.stringify({
-  userEmail: '{{email}}',
-  cardCode: '{{code}}'
-}, null, 2)
-const upstreamConfigTab = ref<'outbound' | 'inbound'>('outbound')
-const upstreamProviderEnabled = ref<'true' | 'false'>('false')
-const upstreamProviderType = ref('custom-http')
-const upstreamSupplierName = ref('')
-const upstreamBaseUrl = ref('')
-const upstreamCustomUrl = ref('')
-const upstreamCustomBodyTemplate = ref(DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE)
-const upstreamTimeoutMs = ref('15000')
-const upstreamOutboundApiKey = ref('')
-const upstreamOutboundApiKeySet = ref(false)
-const upstreamOutboundApiKeyStored = ref(false)
-const upstreamApiEnabled = ref<'true' | 'false'>('false')
-const upstreamPublicBaseUrl = ref('')
-const upstreamPublicBaseUrlStored = ref(false)
-const createUpstreamInboundClientRow = (overrides: Partial<UpstreamInboundClientRow> = {}): UpstreamInboundClientRow => ({
-  id: '',
-  domain: '',
-  apiKey: '',
-  apiKeySet: false,
-  apiKeyStored: false,
-  legacy: false,
-  showApiKey: false,
-  ...overrides,
-})
-const upstreamInboundClients = ref<UpstreamInboundClientRow[]>([createUpstreamInboundClientRow()])
-const upstreamError = ref('')
-const upstreamSuccess = ref('')
-const upstreamLoading = ref(false)
-const showUpstreamOutboundApiKey = ref(false)
-const isCustomUpstreamProvider = computed(() => upstreamProviderType.value === 'custom-http')
-const isPlatformUpstreamProvider = computed(() => upstreamProviderType.value === 'platform-upstream')
-const upstreamPlaceholderHelp = '支持 {{email}}、{{code}}、{{channel}} 三个占位符。'
-const normalizeUpstreamProviderValue = (value?: string | null) => (
-  value === 'platform-upstream' ? 'platform-upstream' : 'custom-http'
-)
-const normalizeUpstreamInboundDomain = (value?: string | null) => {
-  const raw = String(value || '').trim().toLowerCase()
-  if (!raw || raw === '*' || raw === 'default') return ''
-  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`
-  try {
-    return new URL(candidate).hostname.trim().toLowerCase().replace(/\.+$/, '')
-  } catch {
-    return ''
-  }
-}
-const normalizeChannelProviderValue = (value?: string | null) => (
-  value === 'platform-upstream' ? 'platform-upstream' : (value === 'local' ? 'local' : 'custom-http')
-)
-
-onMounted(async () => {
-  await nextTick()
-  teleportReady.value = !!document.getElementById('header-actions')
-})
-
-onUnmounted(() => {
-  teleportReady.value = false
-})
 
 const loadApiKey = async () => {
+  const response = await userService.getApiKey()
+  apiKey.value = response.apiKey || ''
+  apiKeyConfigured.value = Boolean(response.configured)
+}
+
+const saveApiKey = async () => {
+  apiKeyLoading.value = true
   try {
-    const response = await userService.getApiKey()
-    apiKey.value = typeof response.apiKey === 'string' ? response.apiKey : ''
+    const response = await userService.updateApiKey(apiKey.value.trim())
+    apiKey.value = response.apiKey
+    apiKeyConfigured.value = true
+    showSuccessToast(response.message || 'API Key 已更新')
   } catch (err: any) {
-    console.error('Load API key error:', err)
+    showErrorToast(err.response?.data?.error || '更新 API Key 失败')
+  } finally {
+    apiKeyLoading.value = false
   }
 }
 
-const loadFeatureFlags = async () => {
-  featureFlagsError.value = ''
-  featureFlagsSuccess.value = ''
+const loadEmailWhitelist = async () => {
+  const response = await adminService.getEmailDomainWhitelist()
+  emailDomainWhitelist.value = (response.domains || []).join('\n')
+}
+
+const saveEmailWhitelist = async () => {
+  emailWhitelistLoading.value = true
   try {
-    const response = await adminService.getFeatureFlags()
-    const next = response.features || {}
-    featureFlags.value = {
-      xhs: next.xhs !== false,
-      xianyu: next.xianyu !== false,
-      payment: next.payment !== false,
-      openAccounts: next.openAccounts !== false
-    }
-    appConfigStore.features = { ...featureFlags.value }
+    const domains = emailDomainWhitelist.value
+      .split(/[\n,;]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+    const response = await adminService.updateEmailDomainWhitelist(domains)
+    emailDomainWhitelist.value = (response.domains || []).join('\n')
+    showSuccessToast('邮箱白名单已更新')
   } catch (err: any) {
-    featureFlagsError.value = err.response?.data?.error || '加载功能开关失败'
+    showErrorToast(err.response?.data?.error || '更新邮箱白名单失败')
+  } finally {
+    emailWhitelistLoading.value = false
   }
 }
 
-const saveFeatureFlags = async () => {
-  featureFlagsError.value = ''
-  featureFlagsSuccess.value = ''
-  featureFlagsLoading.value = true
+const loadTurnstile = async () => {
+  const response = await adminService.getTurnstileSettings()
+  turnstileSiteKey.value = response.turnstile.siteKey || ''
+  turnstileSecretSet.value = Boolean(response.turnstile.secretSet)
+  turnstileEnabled.value = Boolean(response.enabled)
+  turnstileSecretKey.value = ''
+}
+
+const saveTurnstile = async () => {
+  turnstileLoading.value = true
   try {
-    const response = await adminService.updateFeatureFlags({
-      features: { ...featureFlags.value }
+    const response = await adminService.updateTurnstileSettings({
+      turnstile: {
+        siteKey: turnstileSiteKey.value.trim(),
+        ...(turnstileSecretKey.value.trim() ? { secretKey: turnstileSecretKey.value.trim() } : {}),
+      },
     })
-    const next = response.features || {}
-    featureFlags.value = {
-      xhs: next.xhs !== false,
-      xianyu: next.xianyu !== false,
-      payment: next.payment !== false,
-      openAccounts: next.openAccounts !== false
-    }
-    appConfigStore.features = { ...featureFlags.value }
-    featureFlagsSuccess.value = '已保存'
-    setTimeout(() => (featureFlagsSuccess.value = ''), 3000)
+    turnstileSiteKey.value = response.turnstile.siteKey || ''
+    turnstileSecretSet.value = Boolean(response.turnstile.secretSet)
+    turnstileEnabled.value = Boolean(response.enabled)
+    turnstileSecretKey.value = ''
+    showSuccessToast('Turnstile 配置已更新')
   } catch (err: any) {
-    featureFlagsError.value = err.response?.data?.error || '保存失败'
+    showErrorToast(err.response?.data?.error || '更新 Turnstile 失败')
   } finally {
-    featureFlagsLoading.value = false
+    turnstileLoading.value = false
   }
 }
 
-watch(accountRecoveryForceTodayCodes, (next) => {
-  if (!next) {
-    accountRecoveryRequireExpireCoverDeadline.value = false
-  }
-  if (!accountRecoveryCodeWindowDays.value.trim()) {
-    accountRecoveryCodeWindowDays.value = '7'
-  }
-})
+const loadTelegram = async () => {
+  const response = await adminService.getTelegramSettings()
+  telegramAllowedUserIds.value = response.telegram.allowedUserIds || ''
+  telegramNotifyEnabled.value = Boolean(response.telegram.notifyEnabled)
+  telegramNotifyChatIds.value = response.telegram.notifyChatIds || ''
+  telegramNotifyTimeoutMs.value = String(response.telegram.notifyTimeoutMs || 8000)
+  telegramTokenSet.value = Boolean(response.telegram.tokenSet)
+  telegramBotToken.value = ''
+}
 
-watch(channelFormRedeemMode, (next) => {
-  if (next === 'external-card') {
-    if (channelFormProviderType.value === 'local') {
-      channelFormProviderType.value = 'platform-upstream'
-    }
-    return
-  }
-  channelFormProviderType.value = 'local'
-})
-
-const loadAccountRecoverySettings = async () => {
-  accountRecoverySettingsError.value = ''
-  accountRecoverySettingsSuccess.value = ''
+const saveTelegram = async () => {
+  telegramLoading.value = true
   try {
-    const response = await adminService.getAccountRecoverySettings()
-    const next = response.settings || ({} as any)
-    accountRecoveryForceTodayCodes.value = Boolean(next.forceTodayCodes)
-    accountRecoveryCodeWindowDays.value = String(next.codeWindowDays ?? 7)
-    accountRecoveryRequireExpireCoverDeadline.value = Boolean(next.requireExpireCoverDeadline)
-    if (!accountRecoveryForceTodayCodes.value) {
-      accountRecoveryRequireExpireCoverDeadline.value = false
-    }
+    const response = await adminService.updateTelegramSettings({
+      telegram: {
+        allowedUserIds: telegramAllowedUserIds.value.trim(),
+        ...(telegramBotToken.value.trim() ? { botToken: telegramBotToken.value.trim() } : {}),
+        notifyEnabled: telegramNotifyEnabled.value,
+        notifyChatIds: telegramNotifyChatIds.value.trim(),
+        notifyTimeoutMs: Number(telegramNotifyTimeoutMs.value || 8000),
+      },
+    })
+    telegramAllowedUserIds.value = response.telegram.allowedUserIds || ''
+    telegramNotifyEnabled.value = Boolean(response.telegram.notifyEnabled)
+    telegramNotifyChatIds.value = response.telegram.notifyChatIds || ''
+    telegramNotifyTimeoutMs.value = String(response.telegram.notifyTimeoutMs || 8000)
+    telegramTokenSet.value = Boolean(response.telegram.tokenSet)
+    telegramBotToken.value = ''
+    showSuccessToast('Telegram 配置已更新')
   } catch (err: any) {
-    accountRecoverySettingsError.value = err.response?.data?.error || '加载补录设置失败'
+    showErrorToast(err.response?.data?.error || '更新 Telegram 配置失败')
+  } finally {
+    telegramLoading.value = false
   }
 }
 
-const saveAccountRecoverySettings = async () => {
-  accountRecoverySettingsError.value = ''
-  accountRecoverySettingsSuccess.value = ''
-  accountRecoverySettingsLoading.value = true
+const loadProxy = async () => {
+  const response = await adminService.getProxySettings()
+  proxyUrls.value = response.proxy.proxyUrls || ''
+  proxyEffectiveCount.value = Number(response.proxy.effectiveCount || 0)
+}
+
+const saveProxy = async () => {
+  proxyLoading.value = true
   try {
-    const parsedDays = Number.parseInt(accountRecoveryCodeWindowDays.value, 10)
-    const codeWindowDays = Number.isFinite(parsedDays) ? Math.max(1, Math.min(365, parsedDays)) : 7
-    const settingsPayload = {
-      forceTodayCodes: accountRecoveryForceTodayCodes.value,
-      codeWindowDays,
-      requireExpireCoverDeadline: accountRecoveryForceTodayCodes.value ? accountRecoveryRequireExpireCoverDeadline.value : false
-    }
-    const response = await adminService.updateAccountRecoverySettings({ settings: settingsPayload })
-    const next = response.settings || ({} as any)
-    accountRecoveryForceTodayCodes.value = Boolean(next.forceTodayCodes)
-    accountRecoveryCodeWindowDays.value = String(next.codeWindowDays ?? 7)
-    accountRecoveryRequireExpireCoverDeadline.value = Boolean(next.requireExpireCoverDeadline)
-    if (!accountRecoveryForceTodayCodes.value) {
-      accountRecoveryRequireExpireCoverDeadline.value = false
-    }
-    accountRecoverySettingsSuccess.value = '已保存'
-    setTimeout(() => (accountRecoverySettingsSuccess.value = ''), 3000)
+    const response = await adminService.updateProxySettings({
+      proxy: { proxyUrls: proxyUrls.value.trim() },
+    })
+    proxyUrls.value = response.proxy.proxyUrls || ''
+    proxyEffectiveCount.value = Number(response.proxy.effectiveCount || 0)
+    showSuccessToast('代理配置已更新')
   } catch (err: any) {
-    accountRecoverySettingsError.value = err.response?.data?.error || '保存失败'
+    showErrorToast(err.response?.data?.error || '更新代理配置失败')
   } finally {
-    accountRecoverySettingsLoading.value = false
+    proxyLoading.value = false
+  }
+}
+
+const testProxy = async () => {
+  proxyTesting.value = true
+  try {
+    const response = await adminService.testProxySettings({ proxy: { proxyUrls: proxyUrls.value.trim() } })
+    proxyTestResults.value = response.results || []
+    showInfoToast(`代理测试完成：${response.passed}/${response.total} 通过`)
+  } catch (err: any) {
+    showErrorToast(err.response?.data?.error || '测试代理失败')
+  } finally {
+    proxyTesting.value = false
   }
 }
 
 const loadChannels = async () => {
-  if (channelsLoading.value) return
   channelsLoading.value = true
-  channelsError.value = ''
-  channelsSuccess.value = ''
   try {
     const response = await adminService.getChannels()
-    channels.value = Array.isArray(response.channels) ? response.channels : []
+    channels.value = response.channels || []
   } catch (err: any) {
-    channelsError.value = err.response?.data?.error || '加载渠道失败'
+    showErrorToast(err.response?.data?.error || '加载渠道失败')
   } finally {
     channelsLoading.value = false
   }
@@ -629,7 +215,6 @@ const openCreateChannelDialog = () => {
   channelFormRedeemMode.value = 'code'
   channelFormProviderType.value = 'local'
   channelFormAllowFallback.value = false
-  channelFormAllowDownstreamSale.value = false
   channelFormIsActive.value = true
   channelFormSortOrder.value = '0'
   channelDialogOpen.value = true
@@ -639,3265 +224,291 @@ const openEditChannelDialog = (channel: Channel) => {
   channelDialogMode.value = 'edit'
   channelFormKey.value = channel.key
   channelFormName.value = channel.name
-  channelFormRedeemMode.value = channel.redeemMode === 'api' ? 'code' : (channel.redeemMode || 'code')
-  channelFormProviderType.value = channel.redeemMode === 'external-card' && channel.providerType === 'local'
-    ? 'platform-upstream'
-    : normalizeChannelProviderValue(channel.providerType)
+  channelFormRedeemMode.value = channel.redeemMode
+  channelFormProviderType.value = channel.providerType
   channelFormAllowFallback.value = Boolean(channel.allowCommonFallback)
-  channelFormAllowDownstreamSale.value = Boolean(channel.allowDownstreamSale)
   channelFormIsActive.value = Boolean(channel.isActive)
-  channelFormSortOrder.value = String(channel.sortOrder ?? 0)
+  channelFormSortOrder.value = String(channel.sortOrder || 0)
   channelDialogOpen.value = true
 }
 
-const submitChannelDialog = async () => {
-  channelsError.value = ''
-  channelsSuccess.value = ''
+const saveChannel = async () => {
   try {
+    const payload = {
+      key: channelFormKey.value.trim(),
+      name: channelFormName.value.trim(),
+      redeemMode: channelFormRedeemMode.value,
+      providerType: channelFormProviderType.value,
+      allowCommonFallback: channelFormAllowFallback.value,
+      isActive: channelFormIsActive.value,
+      sortOrder: Number(channelFormSortOrder.value || 0),
+    }
+
     if (channelDialogMode.value === 'create') {
-      await adminService.createChannel({
-        key: channelFormKey.value.trim(),
-        name: channelFormName.value.trim(),
-        redeemMode: channelFormRedeemMode.value,
-        providerType: channelFormProviderType.value,
-        allowCommonFallback: channelFormAllowFallback.value,
-        allowDownstreamSale: channelFormAllowDownstreamSale.value,
-        isActive: channelFormIsActive.value,
-        sortOrder: Number.parseInt(channelFormSortOrder.value || '0', 10) || 0
-      })
+      await adminService.createChannel(payload)
+      showSuccessToast('渠道已创建')
     } else {
       await adminService.updateChannel(channelFormKey.value, {
-        name: channelFormName.value.trim(),
-        redeemMode: channelFormRedeemMode.value,
-        providerType: channelFormProviderType.value,
-        allowCommonFallback: channelFormAllowFallback.value,
-        allowDownstreamSale: channelFormAllowDownstreamSale.value,
-        isActive: channelFormIsActive.value,
-        sortOrder: Number.parseInt(channelFormSortOrder.value || '0', 10) || 0
+        name: payload.name,
+        redeemMode: payload.redeemMode,
+        providerType: payload.providerType,
+        allowCommonFallback: payload.allowCommonFallback,
+        isActive: payload.isActive,
+        sortOrder: payload.sortOrder,
       })
+      showSuccessToast('渠道已更新')
     }
+
     channelDialogOpen.value = false
-    channelsSuccess.value = '已保存'
-    setTimeout(() => (channelsSuccess.value = ''), 3000)
     await loadChannels()
   } catch (err: any) {
-    channelsError.value = err.response?.data?.error || '保存失败'
+    showErrorToast(err.response?.data?.error || '保存渠道失败')
   }
 }
 
-const toggleChannelActive = async (channel: Channel) => {
-  channelsError.value = ''
-  channelsSuccess.value = ''
+const toggleChannel = async (channel: Channel) => {
   try {
     await adminService.updateChannel(channel.key, { isActive: !channel.isActive })
     await loadChannels()
-    channelsSuccess.value = '已保存'
-    setTimeout(() => (channelsSuccess.value = ''), 3000)
+    showSuccessToast('渠道状态已更新')
   } catch (err: any) {
-    channelsError.value = err.response?.data?.error || '更新失败'
+    showErrorToast(err.response?.data?.error || '更新渠道状态失败')
   }
 }
 
 const deleteChannel = async (channel: Channel) => {
-  if (!confirm(`确定要删除渠道「${channel.name || channel.key}」吗？此操作不可撤销。`)) return
-  channelsError.value = ''
-  channelsSuccess.value = ''
+  if (!confirm(`确定删除渠道 ${channel.name} 吗？`)) return
   try {
     await adminService.deleteChannel(channel.key)
     await loadChannels()
-    channelsSuccess.value = '已删除'
-    setTimeout(() => (channelsSuccess.value = ''), 3000)
+    showSuccessToast('渠道已删除')
   } catch (err: any) {
-    channelsError.value = err.response?.data?.error || '删除失败'
+    showErrorToast(err.response?.data?.error || '删除渠道失败')
   }
 }
 
-const loadPurchaseProducts = async () => {
-  if (purchaseProductsLoading.value) return
-  purchaseProductsLoading.value = true
-  purchaseProductsError.value = ''
-  purchaseProductsSuccess.value = ''
-  try {
-    const response = await adminService.getPurchaseProducts()
-    purchaseProducts.value = Array.isArray(response.products) ? response.products : []
-  } catch (err: any) {
-    purchaseProductsError.value = err.response?.data?.error || '加载商品失败'
-  } finally {
-    purchaseProductsLoading.value = false
-  }
-}
-
-const loadPurchaseAvailability = async () => {
-  try {
-    const meta: PurchaseMeta = await purchaseService.getMeta()
-    const map: Record<string, number> = {}
-    for (const plan of meta.plans || []) {
-      map[plan.key] = Number(plan.availableCount || 0)
-    }
-    purchaseAvailability.value = map
-  } catch {
-    purchaseAvailability.value = {}
-  }
-}
-
-const refreshPurchaseProducts = async () => {
-  await Promise.all([loadPurchaseProducts(), loadPurchaseAvailability()])
-}
-
-const openCreatePurchaseProductDialog = async () => {
-  await ensureSettingsResourceLoaded('channels')
-  purchaseProductDialogMode.value = 'create'
-  purchaseProductFormKey.value = ''
-  purchaseProductFormName.value = ''
-  purchaseProductFormAmount.value = ''
-  purchaseProductFormServiceDays.value = '30'
-  purchaseProductFormOrderType.value = 'warranty'
-  purchaseProductFormCodeChannels.value = 'paypal,common'
-  purchaseProductFormIsActive.value = true
-  purchaseProductFormSortOrder.value = '0'
-  purchaseProductDialogOpen.value = true
-}
-
-const openEditPurchaseProductDialog = async (product: PurchaseProduct) => {
-  await ensureSettingsResourceLoaded('channels')
-  purchaseProductDialogMode.value = 'edit'
-  purchaseProductFormKey.value = product.productKey
-  purchaseProductFormName.value = product.productName
-  purchaseProductFormAmount.value = product.amount
-  purchaseProductFormServiceDays.value = String(product.serviceDays ?? 30)
-  purchaseProductFormOrderType.value = product.orderType
-  purchaseProductFormCodeChannels.value = product.codeChannels
-  purchaseProductFormIsActive.value = Boolean(product.isActive)
-  purchaseProductFormSortOrder.value = String(product.sortOrder ?? 0)
-  purchaseProductDialogOpen.value = true
-}
-
-const submitPurchaseProductDialog = async () => {
-  purchaseProductsError.value = ''
-  purchaseProductsSuccess.value = ''
-
-  const payload = {
-    productKey: purchaseProductFormKey.value.trim(),
-    productName: purchaseProductFormName.value.trim(),
-    amount: purchaseProductFormAmount.value.trim(),
-    serviceDays: Number.parseInt(purchaseProductFormServiceDays.value || '0', 10),
-    orderType: purchaseProductFormOrderType.value,
-    codeChannels: purchaseProductFormCodeChannels.value.trim(),
-    isActive: purchaseProductFormIsActive.value,
-    sortOrder: Number.parseInt(purchaseProductFormSortOrder.value || '0', 10) || 0,
-  }
-
-  try {
-    if (purchaseProductDialogMode.value === 'create') {
-      await adminService.createPurchaseProduct(payload)
-    } else {
-      await adminService.updatePurchaseProduct(payload.productKey, payload)
-    }
-    purchaseProductDialogOpen.value = false
-    purchaseProductsSuccess.value = '已保存'
-    setTimeout(() => (purchaseProductsSuccess.value = ''), 3000)
-    await Promise.all([loadPurchaseProducts(), loadPurchaseAvailability()])
-  } catch (err: any) {
-    purchaseProductsError.value = err.response?.data?.error || '保存失败'
-  }
-}
-
-const togglePurchaseProductActive = async (product: PurchaseProduct) => {
-  purchaseProductsError.value = ''
-  purchaseProductsSuccess.value = ''
-  try {
-    await adminService.updatePurchaseProduct(product.productKey, { isActive: !product.isActive })
-    await Promise.all([loadPurchaseProducts(), loadPurchaseAvailability()])
-    purchaseProductsSuccess.value = '已保存'
-    setTimeout(() => (purchaseProductsSuccess.value = ''), 3000)
-  } catch (err: any) {
-    purchaseProductsError.value = err.response?.data?.error || '更新失败'
-  }
-}
-
-const deletePurchaseProduct = async (product: PurchaseProduct) => {
-  if (!confirm(`确定要删除商品「${product.productName || product.productKey}」吗？此操作不可撤销。`)) return
-  purchaseProductsError.value = ''
-  purchaseProductsSuccess.value = ''
-  try {
-    await adminService.deletePurchaseProduct(product.productKey)
-    await Promise.all([loadPurchaseProducts(), loadPurchaseAvailability()])
-    purchaseProductsSuccess.value = '已删除'
-    setTimeout(() => (purchaseProductsSuccess.value = ''), 3000)
-  } catch (err: any) {
-    purchaseProductsError.value = err.response?.data?.error || '删除失败'
-  }
-}
-
-const handleUpdateApiKey = async () => {
-  apiKeyError.value = ''
-  apiKeySuccess.value = ''
-
-  // Validation
-  if (!apiKey.value) {
-    apiKeyError.value = '请输入API密钥'
-    return
-  }
-
-  if (apiKey.value.length < 16) {
-    apiKeyError.value = 'API密钥至少需要 16 个字符以确保安全性'
-    return
-  }
-
-  apiKeyLoading.value = true
-
-  try {
-    await userService.updateApiKey(apiKey.value)
-    apiKeySuccess.value = 'API密钥更新成功！请在油猴脚本中使用新密钥'
-
-    // Clear success message after 5 seconds
-    setTimeout(() => {
-      apiKeySuccess.value = ''
-    }, 5000)
-  } catch (err: any) {
-    apiKeyError.value = err.response?.data?.error || '更新API密钥失败，请重试'
-  } finally {
-    apiKeyLoading.value = false
-  }
-}
-
-// 生成随机API密钥
-const generateApiKey = () => {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
-  const length = 32
-  let result = ''
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
-  apiKey.value = result
-  showApiKey.value = true // 生成后自动显示
-  apiKeySuccess.value = '✅ 已生成随机密钥，点击"更新 API 密钥"保存'
-}
-
-// 切换显示/隐藏API密钥
-const toggleShowApiKey = () => {
-  showApiKey.value = !showApiKey.value
-}
-
-const toggleShowSmtpPass = () => {
-  showSmtpPass.value = !showSmtpPass.value
-}
-
-const toggleShowLinuxdoClientSecret = () => {
-  showLinuxdoClientSecret.value = !showLinuxdoClientSecret.value
-}
-
-const toggleShowLinuxdoCreditKey = () => {
-  showLinuxdoCreditKey.value = !showLinuxdoCreditKey.value
-}
-
-const toggleShowZpayKey = () => {
-  showZpayKey.value = !showZpayKey.value
-}
-
-const toggleShowTurnstileSecretKey = () => {
-  showTurnstileSecretKey.value = !showTurnstileSecretKey.value
-}
-
-const toggleShowTelegramBotToken = () => {
-  showTelegramBotToken.value = !showTelegramBotToken.value
-}
-
-const toggleShowUpstreamOutboundApiKey = () => {
-  showUpstreamOutboundApiKey.value = !showUpstreamOutboundApiKey.value
-}
-
-const toggleShowUpstreamInboundClientApiKey = (index: number) => {
-  const target = upstreamInboundClients.value[index]
-  if (!target) return
-  target.showApiKey = !target.showApiKey
-}
-
-const addUpstreamInboundClient = () => {
-  upstreamInboundClients.value = [...upstreamInboundClients.value, createUpstreamInboundClientRow()]
-}
-
-const removeUpstreamInboundClient = (index: number) => {
-  if (upstreamInboundClients.value.length === 1) {
-    upstreamInboundClients.value = [createUpstreamInboundClientRow()]
-    return
-  }
-  upstreamInboundClients.value = upstreamInboundClients.value.filter((_, currentIndex) => currentIndex !== index)
-}
-
-const loadEmailDomainWhitelist = async () => {
-  emailDomainWhitelistError.value = ''
-  emailDomainWhitelistSuccess.value = ''
-  try {
-    const response = await adminService.getEmailDomainWhitelist()
-    emailDomainWhitelist.value = (response.domains || []).join(',')
-  } catch (err: any) {
-    emailDomainWhitelistError.value = err.response?.data?.error || '加载邮箱白名单失败'
-  }
-}
-
-const saveEmailDomainWhitelist = async () => {
-  emailDomainWhitelistError.value = ''
-  emailDomainWhitelistSuccess.value = ''
-  emailDomainWhitelistLoading.value = true
-  try {
-    const domains = emailDomainWhitelist.value
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean)
-    await adminService.updateEmailDomainWhitelist(domains)
-    emailDomainWhitelistSuccess.value = '已保存'
-    setTimeout(() => (emailDomainWhitelistSuccess.value = ''), 3000)
-  } catch (err: any) {
-    emailDomainWhitelistError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    emailDomainWhitelistLoading.value = false
-  }
-}
-
-const loadLinuxDoOAuthSettings = async () => {
-  linuxdoOauthError.value = ''
-  linuxdoOauthSuccess.value = ''
-  try {
-    const response = await adminService.getLinuxDoOAuthSettings()
-    linuxdoClientId.value = response.oauth?.clientId || ''
-    linuxdoRedirectUri.value = response.oauth?.redirectUri || ''
-    linuxdoClientSecret.value = ''
-    linuxdoClientSecretSet.value = Boolean(response.oauth?.clientSecretSet)
-    linuxdoClientSecretStored.value = Boolean(response.oauth?.clientSecretStored)
-  } catch (err: any) {
-    linuxdoOauthError.value = err.response?.data?.error || '加载 Linux DO OAuth 配置失败'
-  }
-}
-
-const saveLinuxDoOAuthSettings = async () => {
-  linuxdoOauthError.value = ''
-  linuxdoOauthSuccess.value = ''
-
-  const clientId = linuxdoClientId.value.trim()
-  const redirectUri = linuxdoRedirectUri.value.trim()
-  const clientSecretTrimmed = linuxdoClientSecret.value.trim()
-
-  const wantsEnable = Boolean(clientId || redirectUri || clientSecretTrimmed)
-  if (wantsEnable) {
-    if (!clientId) {
-      linuxdoOauthError.value = '请输入 Linux DO Client ID'
-      return
-    }
-    if (!redirectUri) {
-      linuxdoOauthError.value = '请输入 Linux DO Redirect URI'
-      return
-    }
-    if (!clientSecretTrimmed && !linuxdoClientSecretSet.value) {
-      linuxdoOauthError.value = '请输入 Linux DO Client Secret'
-      return
-    }
-
-    try {
-      const parsed = new URL(redirectUri)
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        linuxdoOauthError.value = 'Redirect URI 必须是 http(s)'
-        return
-      }
-    } catch {
-      linuxdoOauthError.value = 'Redirect URI 格式不正确'
-      return
-    }
-  }
-
-  linuxdoOauthLoading.value = true
-  try {
-    const payload: any = {
-      oauth: {
-        clientId,
-        redirectUri,
-      },
-    }
-    if (clientSecretTrimmed) {
-      payload.oauth.clientSecret = clientSecretTrimmed
-    }
-
-    const response = await adminService.updateLinuxDoOAuthSettings(payload)
-    linuxdoClientId.value = response.oauth?.clientId || clientId
-    linuxdoRedirectUri.value = response.oauth?.redirectUri || redirectUri
-    linuxdoClientSecret.value = ''
-    linuxdoClientSecretSet.value = Boolean(response.oauth?.clientSecretSet)
-    linuxdoClientSecretStored.value = Boolean(response.oauth?.clientSecretStored)
-
-    linuxdoOauthSuccess.value = '已保存'
-    setTimeout(() => (linuxdoOauthSuccess.value = ''), 3000)
-  } catch (err: any) {
-    linuxdoOauthError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    linuxdoOauthLoading.value = false
-  }
-}
-
-const loadLinuxDoCreditSettings = async () => {
-  linuxdoCreditError.value = ''
-  linuxdoCreditSuccess.value = ''
-  try {
-    const response = await adminService.getLinuxDoCreditSettings()
-    linuxdoCreditPid.value = response.credit?.pid || ''
-    linuxdoCreditKey.value = ''
-    linuxdoCreditKeySet.value = Boolean(response.credit?.keySet)
-    linuxdoCreditKeyStored.value = Boolean(response.credit?.keyStored)
-  } catch (err: any) {
-    linuxdoCreditError.value = err.response?.data?.error || '加载 Linux DO Credit 配置失败'
-  }
-}
-
-const saveLinuxDoCreditSettings = async () => {
-  linuxdoCreditError.value = ''
-  linuxdoCreditSuccess.value = ''
-
-  const pid = linuxdoCreditPid.value.trim()
-  const keyTrimmed = linuxdoCreditKey.value.trim()
-  const wantsEnable = Boolean(pid || keyTrimmed)
-
-  if (wantsEnable) {
-    if (!pid) {
-      linuxdoCreditError.value = '请输入 Credit PID'
-      return
-    }
-    if (!keyTrimmed && !linuxdoCreditKeySet.value) {
-      linuxdoCreditError.value = '请输入 Credit KEY'
-      return
-    }
-  }
-
-  linuxdoCreditLoading.value = true
-  try {
-    const payload: any = { credit: { pid } }
-    if (keyTrimmed) {
-      payload.credit.key = keyTrimmed
-    }
-    const response = await adminService.updateLinuxDoCreditSettings(payload)
-    linuxdoCreditPid.value = response.credit?.pid || pid
-    linuxdoCreditKey.value = ''
-    linuxdoCreditKeySet.value = Boolean(response.credit?.keySet)
-    linuxdoCreditKeyStored.value = Boolean(response.credit?.keyStored)
-
-    linuxdoCreditSuccess.value = '已保存'
-    setTimeout(() => (linuxdoCreditSuccess.value = ''), 3000)
-  } catch (err: any) {
-    linuxdoCreditError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    linuxdoCreditLoading.value = false
-  }
-}
-
-const loadZpaySettings = async () => {
-  zpayError.value = ''
-  zpaySuccess.value = ''
-  try {
-    const response = await adminService.getZpaySettings()
-    zpayBaseUrl.value = response.zpay?.baseUrl || 'https://zpayz.cn'
-    zpayPid.value = response.zpay?.pid || ''
-    zpayKey.value = ''
-    zpayKeySet.value = Boolean(response.zpay?.keySet)
-    zpayKeyStored.value = Boolean(response.zpay?.keyStored)
-  } catch (err: any) {
-    zpayError.value = err.response?.data?.error || '加载 ZPAY 配置失败'
-  }
-}
-
-const saveZpaySettings = async () => {
-  zpayError.value = ''
-  zpaySuccess.value = ''
-
-  const baseUrl = zpayBaseUrl.value.trim()
-  if (baseUrl) {
-    try {
-      const parsed = new URL(baseUrl)
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        zpayError.value = 'ZPAY Base URL 必须是 http(s)'
-        return
-      }
-    } catch {
-      zpayError.value = 'ZPAY Base URL 格式不正确'
-      return
-    }
-  }
-
-  const pid = zpayPid.value.trim()
-  const keyTrimmed = zpayKey.value.trim()
-  if (pid) {
-    if (!keyTrimmed && !zpayKeySet.value) {
-      zpayError.value = '请输入 ZPAY KEY'
-      return
-    }
-  }
-
-  zpayLoading.value = true
-  try {
-    const payload: any = { zpay: { baseUrl, pid } }
-    if (keyTrimmed) {
-      payload.zpay.key = keyTrimmed
-    }
-    const response = await adminService.updateZpaySettings(payload)
-    zpayBaseUrl.value = response.zpay?.baseUrl || baseUrl || 'https://zpayz.cn'
-    zpayPid.value = response.zpay?.pid || pid
-    zpayKey.value = ''
-    zpayKeySet.value = Boolean(response.zpay?.keySet)
-    zpayKeyStored.value = Boolean(response.zpay?.keyStored)
-
-    zpaySuccess.value = '已保存'
-    setTimeout(() => (zpaySuccess.value = ''), 3000)
-  } catch (err: any) {
-    zpayError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    zpayLoading.value = false
-  }
-}
-
-const loadDownstreamSaleSettings = async () => {
-  downstreamSaleError.value = ''
-  downstreamSaleSuccess.value = ''
-  try {
-    const response = await adminService.getDownstreamSaleSettings()
-    downstreamSaleEnabled.value = Boolean(response.downstreamSale?.enabled)
-    downstreamSaleProductName.value = response.downstreamSale?.productName || ''
-    downstreamSaleAmount.value = response.downstreamSale?.amount || '9.90'
-    downstreamSalePayAlipayEnabled.value = response.downstreamSale?.payAlipayEnabled !== false
-    downstreamSalePayWxpayEnabled.value = Boolean(response.downstreamSale?.payWxpayEnabled)
-  } catch (err: any) {
-    downstreamSaleError.value = err.response?.data?.error || '加载下游售码配置失败'
-  }
-}
-
-const saveDownstreamSaleSettings = async () => {
-  downstreamSaleError.value = ''
-  downstreamSaleSuccess.value = ''
-
-  const productName = downstreamSaleProductName.value.trim()
-  const amount = downstreamSaleAmount.value.trim()
-  if (!productName) {
-    downstreamSaleError.value = '请输入下游售码商品名'
-    return
-  }
-  if (!amount) {
-    downstreamSaleError.value = '请输入下游统一售价'
-    return
-  }
-  if (!downstreamSalePayAlipayEnabled.value && !downstreamSalePayWxpayEnabled.value) {
-    downstreamSaleError.value = '支付宝和微信至少启用一个'
-    return
-  }
-
-  downstreamSaleLoading.value = true
-  try {
-    const response = await adminService.updateDownstreamSaleSettings({
-      downstreamSale: {
-        enabled: downstreamSaleEnabled.value,
-        productName,
-        amount,
-        payAlipayEnabled: downstreamSalePayAlipayEnabled.value,
-        payWxpayEnabled: downstreamSalePayWxpayEnabled.value,
-      }
-    })
-    downstreamSaleEnabled.value = Boolean(response.downstreamSale?.enabled)
-    downstreamSaleProductName.value = response.downstreamSale?.productName || productName
-    downstreamSaleAmount.value = response.downstreamSale?.amount || amount
-    downstreamSalePayAlipayEnabled.value = response.downstreamSale?.payAlipayEnabled !== false
-    downstreamSalePayWxpayEnabled.value = Boolean(response.downstreamSale?.payWxpayEnabled)
-    downstreamSaleSuccess.value = '已保存'
-    setTimeout(() => (downstreamSaleSuccess.value = ''), 3000)
-  } catch (err: any) {
-    downstreamSaleError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    downstreamSaleLoading.value = false
-  }
-}
-
-const loadTurnstileSettings = async () => {
-  turnstileError.value = ''
-  turnstileSuccess.value = ''
-  try {
-    const response = await adminService.getTurnstileSettings()
-    turnstileSiteKey.value = response.turnstile?.siteKey || ''
-    turnstileSecretKey.value = ''
-    turnstileEnabled.value = Boolean(response.enabled)
-    turnstileSecretSet.value = Boolean(response.turnstile?.secretSet)
-    turnstileSecretStored.value = Boolean(response.turnstile?.secretStored)
-    turnstileSiteKeyStored.value = Boolean(response.turnstile?.siteKeyStored)
-  } catch (err: any) {
-    turnstileError.value = err.response?.data?.error || '加载 Turnstile 配置失败'
-  }
-}
-
-const saveTurnstileSettings = async () => {
-  turnstileError.value = ''
-  turnstileSuccess.value = ''
-
-  const siteKey = turnstileSiteKey.value.trim()
-  const secretTrimmed = turnstileSecretKey.value.trim()
-
-  turnstileLoading.value = true
-  try {
-    const payload: any = { turnstile: { siteKey } }
-    if (secretTrimmed) {
-      payload.turnstile.secretKey = secretTrimmed
-    }
-
-    const response = await adminService.updateTurnstileSettings(payload)
-    turnstileSiteKey.value = response.turnstile?.siteKey || siteKey
-    turnstileSecretKey.value = ''
-    turnstileEnabled.value = Boolean(response.enabled)
-    turnstileSecretSet.value = Boolean(response.turnstile?.secretSet)
-    turnstileSecretStored.value = Boolean(response.turnstile?.secretStored)
-    turnstileSiteKeyStored.value = Boolean(response.turnstile?.siteKeyStored)
-
-    turnstileSuccess.value = '已保存'
-    setTimeout(() => (turnstileSuccess.value = ''), 3000)
-  } catch (err: any) {
-    turnstileError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    turnstileLoading.value = false
-  }
-}
-
-const loadTelegramSettings = async () => {
-  telegramError.value = ''
-  telegramSuccess.value = ''
-  try {
-    const response = await adminService.getTelegramSettings()
-    telegramAllowedUserIds.value = response.telegram?.allowedUserIds || ''
-    telegramAllowedUserIdsStored.value = Boolean(response.telegram?.allowedUserIdsStored)
-    telegramBotToken.value = ''
-    telegramTokenSet.value = Boolean(response.telegram?.tokenSet)
-    telegramTokenStored.value = Boolean(response.telegram?.tokenStored)
-    telegramNotifyEnabled.value = response.telegram?.notifyEnabled === false ? 'false' : 'true'
-    telegramNotifyEnabledStored.value = Boolean(response.telegram?.notifyEnabledStored)
-    telegramNotifyChatIds.value = response.telegram?.notifyChatIds || ''
-    telegramNotifyChatIdsStored.value = Boolean(response.telegram?.notifyChatIdsStored)
-    telegramNotifyTimeoutMs.value = String(response.telegram?.notifyTimeoutMs ?? 8000)
-    telegramNotifyTimeoutMsStored.value = Boolean(response.telegram?.notifyTimeoutMsStored)
-  } catch (err: any) {
-    telegramError.value = err.response?.data?.error || '加载 Telegram 配置失败'
-  }
-}
-
-const saveTelegramSettings = async () => {
-  telegramError.value = ''
-  telegramSuccess.value = ''
-
-  const allowedIdsRaw = telegramAllowedUserIds.value.trim()
-  if (allowedIdsRaw) {
-    const items = allowedIdsRaw
-      .split(',')
-      .map(item => item.trim())
-      .filter(Boolean)
-    const invalid = items.find(item => !/^\d+$/.test(item))
-    if (invalid) {
-      telegramError.value = `允许的用户 ID 格式不正确：${invalid}`
-      return
-    }
-  }
-
-  const notifyChatIdsRaw = telegramNotifyChatIds.value.trim()
-  if (notifyChatIdsRaw) {
-    const items = notifyChatIdsRaw
-      .split(',')
-      .map(item => item.trim())
-      .filter(Boolean)
-    const invalid = items.find(item => !/^-?\d+$/.test(item) && !/^@[\w_]{5,32}$/.test(item))
-    if (invalid) {
-      telegramError.value = `通知 chat_id 格式不正确：${invalid}`
-      return
-    }
-  }
-
-  const notifyTimeoutRaw = telegramNotifyTimeoutMs.value.trim()
-  const notifyTimeoutMs = Number.parseInt(notifyTimeoutRaw, 10)
-  if (!Number.isFinite(notifyTimeoutMs) || notifyTimeoutMs <= 0) {
-    telegramError.value = '通知超时时间需为正整数（毫秒）'
-    return
-  }
-
-  telegramLoading.value = true
-  try {
-    const payload: any = { telegram: { allowedUserIds: allowedIdsRaw } }
-    const tokenTrimmed = telegramBotToken.value.trim()
-    if (tokenTrimmed) {
-      payload.telegram.botToken = tokenTrimmed
-    }
-    payload.telegram.notifyEnabled = telegramNotifyEnabled.value === 'true'
-    payload.telegram.notifyChatIds = notifyChatIdsRaw
-    payload.telegram.notifyTimeoutMs = notifyTimeoutMs
-
-    const response = await adminService.updateTelegramSettings(payload)
-    telegramAllowedUserIds.value = response.telegram?.allowedUserIds || allowedIdsRaw
-    telegramAllowedUserIdsStored.value = Boolean(response.telegram?.allowedUserIdsStored)
-    telegramBotToken.value = ''
-    telegramTokenSet.value = Boolean(response.telegram?.tokenSet)
-    telegramTokenStored.value = Boolean(response.telegram?.tokenStored)
-    telegramNotifyEnabled.value = response.telegram?.notifyEnabled === false ? 'false' : 'true'
-    telegramNotifyEnabledStored.value = Boolean(response.telegram?.notifyEnabledStored)
-    telegramNotifyChatIds.value = response.telegram?.notifyChatIds || notifyChatIdsRaw
-    telegramNotifyChatIdsStored.value = Boolean(response.telegram?.notifyChatIdsStored)
-    telegramNotifyTimeoutMs.value = String(response.telegram?.notifyTimeoutMs ?? notifyTimeoutMs)
-    telegramNotifyTimeoutMsStored.value = Boolean(response.telegram?.notifyTimeoutMsStored)
-
-    telegramSuccess.value = '已保存（Bot Token 修改需重启后端生效；通知配置实时生效）'
-    setTimeout(() => (telegramSuccess.value = ''), 3000)
-  } catch (err: any) {
-    telegramError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    telegramLoading.value = false
-  }
-}
-
-const loadProxySettings = async () => {
-  proxyError.value = ''
-  proxySuccess.value = ''
-  try {
-    const response = await adminService.getProxySettings()
-    setProxyRowsFromText(response.proxy?.proxyUrls || '')
-    proxyStored.value = Boolean(response.proxy?.stored)
-    proxyEffectiveCount.value = Number(response.proxy?.effectiveCount ?? 0)
-    resetProxyTestState()
-  } catch (err: any) {
-    proxyError.value = err.response?.data?.error || '加载代理配置失败'
-  }
-}
-
-const saveProxySettings = async () => {
-  proxyError.value = ''
-  proxySuccess.value = ''
-  proxyLoading.value = true
-  try {
-    const response = await adminService.updateProxySettings({
-      proxy: {
-        proxyUrls: proxyDraftProxyUrls.value,
-      }
-    })
-    setProxyRowsFromText(response.proxy?.proxyUrls || '')
-    proxyStored.value = Boolean(response.proxy?.stored)
-    proxyEffectiveCount.value = Number(response.proxy?.effectiveCount ?? 0)
-    resetProxyTestState()
-    proxySuccess.value = '已保存'
-    setTimeout(() => (proxySuccess.value = ''), 3000)
-  } catch (err: any) {
-    proxyError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    proxyLoading.value = false
-  }
-}
-
-const testProxySettings = async () => {
-  proxyError.value = ''
-  if (!proxyDraftCount.value) {
-    proxyError.value = '请先填写至少一个代理'
-    resetProxyTestState()
-    return
-  }
-  proxyTesting.value = true
-  resetProxyTestState()
-  try {
-    const response = await adminService.testProxySettings({
-      proxy: {
-        proxyUrls: proxyDraftProxyUrls.value,
-      }
-    })
-    proxyTestTotal.value = Number(response.total ?? 0)
-    proxyTestPassed.value = Number(response.passed ?? 0)
-    proxyTestFailed.value = Number(response.failed ?? 0)
-    proxyTestResults.value = Array.isArray(response.results) ? response.results : []
-    proxyLastTestedProxyUrls.value = proxyDraftProxyUrls.value
-  } catch (err: any) {
-    proxyError.value = err.response?.data?.error || '测试失败'
-  } finally {
-    proxyTesting.value = false
-  }
-}
-
-const loadUpstreamSettings = async () => {
-  upstreamError.value = ''
-  upstreamSuccess.value = ''
-  try {
-    const response = await adminService.getUpstreamSettings()
-    upstreamProviderEnabled.value = response.upstream?.providerEnabled ? 'true' : 'false'
-    upstreamProviderType.value = normalizeUpstreamProviderValue(response.upstream?.providerType)
-    upstreamSupplierName.value = response.upstream?.supplierName || ''
-    upstreamBaseUrl.value = response.upstream?.baseUrl || ''
-    upstreamCustomUrl.value = response.upstream?.customUrl || ''
-    upstreamCustomBodyTemplate.value = response.upstream?.customBodyTemplate || DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE
-    upstreamTimeoutMs.value = String(response.upstream?.timeoutMs ?? 15000)
-    upstreamOutboundApiKey.value = ''
-    upstreamOutboundApiKeySet.value = Boolean(response.upstream?.outboundApiKeySet)
-    upstreamOutboundApiKeyStored.value = Boolean(response.upstream?.outboundApiKeyStored)
-    upstreamApiEnabled.value = response.upstream?.apiEnabled ? 'true' : 'false'
-    upstreamPublicBaseUrl.value = response.upstream?.publicBaseUrl || ''
-    upstreamPublicBaseUrlStored.value = Boolean(response.upstream?.publicBaseUrlStored)
-    const inboundClients = Array.isArray(response.upstream?.inboundClients)
-      ? response.upstream.inboundClients
-      : []
-    upstreamInboundClients.value = inboundClients.length > 0
-      ? inboundClients.map(client => createUpstreamInboundClientRow({
-        id: client.id || '',
-        domain: client.domain || '',
-        apiKey: '',
-        apiKeySet: Boolean(client.apiKeySet),
-        apiKeyStored: Boolean(client.apiKeyStored),
-        legacy: Boolean(client.legacy),
-        showApiKey: false,
-      }))
-      : [createUpstreamInboundClientRow()]
-  } catch (err: any) {
-    upstreamError.value = err.response?.data?.error || '加载上下游接口配置失败'
-  }
-}
-
-const saveUpstreamSettings = async () => {
-  upstreamError.value = ''
-  upstreamSuccess.value = ''
-  const providerEnabled = upstreamProviderEnabled.value === 'true'
-  const providerType = normalizeUpstreamProviderValue(upstreamProviderType.value)
-  const baseUrl = upstreamBaseUrl.value.trim()
-  const customUrl = upstreamCustomUrl.value.trim()
-  const customBodyTemplate = upstreamCustomBodyTemplate.value.trim() || DEFAULT_UPSTREAM_CUSTOM_BODY_TEMPLATE
-
-  if (providerType === 'platform-upstream') {
-    if (providerEnabled && !baseUrl) {
-      upstreamError.value = '启用平台通用接口时必须填写平台 Base URL'
-      return
-    }
-
-    if (baseUrl) {
-      try {
-        const parsed = new URL(baseUrl)
-        if (!['http:', 'https:'].includes(parsed.protocol)) {
-          upstreamError.value = '上游 Base URL 必须是 http(s)'
-          return
-        }
-      } catch {
-        upstreamError.value = '上游 Base URL 格式不正确'
-        return
-      }
-    }
-  }
-
-  if (providerType === 'custom-http') {
-    if (providerEnabled && !customUrl) {
-      upstreamError.value = '启用自定义接口时必须填写请求 URL'
-      return
-    }
-
-    if (customUrl) {
-      try {
-        const parsed = new URL(customUrl)
-        if (!['http:', 'https:'].includes(parsed.protocol)) {
-          upstreamError.value = '自定义接口 URL 必须是 http(s)'
-          return
-        }
-      } catch {
-        upstreamError.value = '自定义接口 URL 格式不正确'
-        return
-      }
-    }
-
-    try {
-      JSON.parse(customBodyTemplate)
-    } catch {
-      upstreamError.value = '自定义接口 Body JSON 格式不正确，或占位符位置不合法'
-      return
-    }
-  }
-
-  const timeoutMs = Number.parseInt(upstreamTimeoutMs.value.trim(), 10)
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    upstreamError.value = '超时时间需为正整数（毫秒）'
-    return
-  }
-
-  const publicBaseUrl = upstreamPublicBaseUrl.value.trim()
-  if (publicBaseUrl) {
-    try {
-      const parsed = new URL(publicBaseUrl)
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        upstreamError.value = '公网 Base URL 必须是 http(s)'
-        return
-      }
-    } catch {
-      upstreamError.value = '公网 Base URL 格式不正确'
-      return
-    }
-  }
-
-  const seenInboundDomains = new Set<string>()
-  const inboundClients: Array<{ id?: string; domain: string; apiKey?: string }> = []
-  for (let index = 0; index < upstreamInboundClients.value.length; index += 1) {
-    const client = upstreamInboundClients.value[index]
-    if (!client) continue
-    const rawDomain = client.domain.trim()
-    const normalizedDomain = normalizeUpstreamInboundDomain(rawDomain)
-    const apiKey = client.apiKey.trim()
-    const hasPersistedKey = client.apiKeySet
-    const isMeaningfulRow = Boolean(rawDomain || apiKey || hasPersistedKey || client.id)
-
-    if (!isMeaningfulRow) continue
-    if (rawDomain && !normalizedDomain) {
-      upstreamError.value = `第 ${index + 1} 条下游域名格式不正确`
-      return
-    }
-    if (seenInboundDomains.has(normalizedDomain)) {
-      upstreamError.value = normalizedDomain ? `下游域名重复：${normalizedDomain}` : '默认入站规则只能保留一条'
-      return
-    }
-    seenInboundDomains.add(normalizedDomain)
-    if (!apiKey && !hasPersistedKey) {
-      upstreamError.value = normalizedDomain ? `请为 ${normalizedDomain} 填写 API Key` : '请为默认入站规则填写 API Key'
-      return
-    }
-
-    inboundClients.push({
-      id: client.id || undefined,
-      domain: normalizedDomain,
-      apiKey: apiKey || undefined,
-    })
-  }
-
-  if (upstreamApiEnabled.value === 'true' && inboundClients.length === 0) {
-    upstreamError.value = '启用入站接口时，至少要配置一个下游域名与 API Key'
-    return
-  }
-
-  upstreamLoading.value = true
-  try {
-    const payload: any = {
-      upstream: {
-        providerEnabled,
-        providerType,
-        supplierName: upstreamSupplierName.value.trim(),
-        timeoutMs,
-        apiEnabled: upstreamApiEnabled.value === 'true',
-        publicBaseUrl,
-        inboundClients,
-      }
-    }
-
-    if (providerType === 'platform-upstream') {
-      payload.upstream.baseUrl = baseUrl
-    }
-
-    if (providerType === 'custom-http') {
-      payload.upstream.customUrl = customUrl
-      payload.upstream.customBodyTemplate = customBodyTemplate
-    }
-
-    const outboundKey = upstreamOutboundApiKey.value.trim()
-    if (providerType === 'platform-upstream' && outboundKey) {
-      payload.upstream.outboundApiKey = outboundKey
-    }
-
-    const response = await adminService.updateUpstreamSettings(payload)
-    upstreamProviderEnabled.value = response.upstream?.providerEnabled ? 'true' : 'false'
-    upstreamProviderType.value = normalizeUpstreamProviderValue(response.upstream?.providerType)
-    upstreamSupplierName.value = response.upstream?.supplierName || upstreamSupplierName.value.trim()
-    upstreamBaseUrl.value = response.upstream?.baseUrl || baseUrl
-    upstreamCustomUrl.value = response.upstream?.customUrl || customUrl
-    upstreamCustomBodyTemplate.value = response.upstream?.customBodyTemplate || customBodyTemplate
-    upstreamTimeoutMs.value = String(response.upstream?.timeoutMs ?? timeoutMs)
-    upstreamOutboundApiKey.value = ''
-    upstreamOutboundApiKeySet.value = Boolean(response.upstream?.outboundApiKeySet)
-    upstreamOutboundApiKeyStored.value = Boolean(response.upstream?.outboundApiKeyStored)
-    upstreamApiEnabled.value = response.upstream?.apiEnabled ? 'true' : 'false'
-    upstreamPublicBaseUrl.value = response.upstream?.publicBaseUrl || publicBaseUrl
-    upstreamPublicBaseUrlStored.value = Boolean(response.upstream?.publicBaseUrlStored)
-    const savedInboundClients = Array.isArray(response.upstream?.inboundClients)
-      ? response.upstream.inboundClients
-      : []
-    upstreamInboundClients.value = savedInboundClients.length > 0
-      ? savedInboundClients.map(client => createUpstreamInboundClientRow({
-        id: client.id || '',
-        domain: client.domain || '',
-        apiKey: '',
-        apiKeySet: Boolean(client.apiKeySet),
-        apiKeyStored: Boolean(client.apiKeyStored),
-        legacy: Boolean(client.legacy),
-        showApiKey: false,
-      }))
-      : [createUpstreamInboundClientRow()]
-
-    upstreamSuccess.value = '已保存'
-    setTimeout(() => (upstreamSuccess.value = ''), 3000)
-  } catch (err: any) {
-    upstreamError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    upstreamLoading.value = false
-  }
-}
-
-const loadSmtpSettings = async () => {
-  smtpError.value = ''
-  smtpSuccess.value = ''
-  try {
-    const response = await adminService.getSmtpSettings()
-    smtpHost.value = response.smtp?.host || ''
-    smtpPort.value = String(response.smtp?.port ?? 465)
-    smtpSecure.value = response.smtp?.secure ? 'true' : 'false'
-    smtpUser.value = response.smtp?.user || ''
-    smtpFrom.value = response.smtp?.from || ''
-    adminAlertEmail.value = response.adminAlertEmail || ''
-    smtpPass.value = ''
-    smtpPassSet.value = Boolean(response.smtp?.passSet)
-    smtpPassStored.value = Boolean(response.smtp?.passStored)
-  } catch (err: any) {
-    smtpError.value = err.response?.data?.error || '加载 SMTP 配置失败'
-  }
-}
-
-const saveSmtpSettings = async () => {
-  smtpError.value = ''
-  smtpSuccess.value = ''
-
-  const host = smtpHost.value.trim()
-  const port = Number.parseInt(smtpPort.value.trim(), 10)
-  if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-    smtpError.value = '请输入有效的 SMTP 端口（1-65535）'
-    return
-  }
-
-  const secure = smtpSecure.value === 'true'
-  const user = smtpUser.value.trim()
-  const from = smtpFrom.value.trim()
-  const recipients = adminAlertEmail.value.trim()
-
-  const passTrimmed = smtpPass.value.trim()
-
-  smtpLoading.value = true
-  try {
-    const payload: any = {
-      smtp: {
-        host,
-        port,
-        secure,
-        user,
-        from,
-      },
-      adminAlertEmail: recipients,
-    }
-    if (passTrimmed) {
-      payload.smtp.pass = passTrimmed
-    }
-
-    const response = await adminService.updateSmtpSettings(payload)
-    smtpHost.value = response.smtp?.host || host
-    smtpPort.value = String(response.smtp?.port ?? port)
-    smtpSecure.value = response.smtp?.secure ? 'true' : 'false'
-    smtpUser.value = response.smtp?.user || user
-    smtpFrom.value = response.smtp?.from || from
-    adminAlertEmail.value = response.adminAlertEmail || recipients
-    smtpPass.value = ''
-    smtpPassSet.value = Boolean(response.smtp?.passSet)
-    smtpPassStored.value = Boolean(response.smtp?.passStored)
-    smtpSuccess.value = '已保存'
-    setTimeout(() => (smtpSuccess.value = ''), 3000)
-  } catch (err: any) {
-    smtpError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    smtpLoading.value = false
-  }
-}
-
-const parseYuanToCents = (value: string) => {
-  const raw = String(value ?? '').trim()
-  if (!raw) return NaN
-  if (!/^[0-9]+(\.[0-9]{1,2})?$/.test(raw)) return NaN
-
-  const parts = raw.split('.')
-  const yuan = Number.parseInt(parts[0] || '0', 10)
-  const centsText = String(parts[1] || '')
-  const cents = Number.parseInt((centsText + '00').slice(0, 2), 10)
-  return yuan * 100 + cents
-}
-
-const loadPointsWithdrawSettings = async () => {
-  pointsWithdrawError.value = ''
-  pointsWithdrawSuccess.value = ''
-  try {
-    const response = await adminService.getPointsWithdrawSettings()
-    pointsWithdrawRatePoints.value = String(response.rate?.points ?? 1)
-    pointsWithdrawRateCashYuan.value = ((Number(response.rate?.cashCents ?? 100) || 0) / 100).toFixed(2)
-    pointsWithdrawMinCashYuan.value = ((Number(response.minCashCents ?? 1000) || 0) / 100).toFixed(2)
-    pointsWithdrawMinPoints.value = Number(response.minPoints ?? 0)
-    pointsWithdrawStepPoints.value = Number(response.stepPoints ?? 0)
-  } catch (err: any) {
-    pointsWithdrawError.value = err.response?.data?.error || '加载积分提现设置失败'
-  }
-}
-
-const savePointsWithdrawSettings = async () => {
-  pointsWithdrawError.value = ''
-  pointsWithdrawSuccess.value = ''
-
-  const ratePoints = Number.parseInt(pointsWithdrawRatePoints.value.trim(), 10)
-  if (!Number.isFinite(ratePoints) || ratePoints <= 0) {
-    pointsWithdrawError.value = '请输入有效的积分比例（正整数）'
-    return
-  }
-
-  const rateCashCents = parseYuanToCents(pointsWithdrawRateCashYuan.value)
-  if (!Number.isFinite(rateCashCents) || rateCashCents <= 0) {
-    pointsWithdrawError.value = '请输入有效的返现金额（元）'
-    return
-  }
-
-  const minCashCents = parseYuanToCents(pointsWithdrawMinCashYuan.value)
-  if (!Number.isFinite(minCashCents) || minCashCents < 0) {
-    pointsWithdrawError.value = '请输入有效的最低提现金额（元）'
-    return
-  }
-
-  pointsWithdrawLoading.value = true
-  try {
-    const response = await adminService.updatePointsWithdrawSettings({
-      ratePoints,
-      rateCashCents,
-      minCashCents,
-    })
-    pointsWithdrawRatePoints.value = String(response.rate?.points ?? ratePoints)
-    pointsWithdrawRateCashYuan.value = ((Number(response.rate?.cashCents ?? rateCashCents) || 0) / 100).toFixed(2)
-    pointsWithdrawMinCashYuan.value = ((Number(response.minCashCents ?? minCashCents) || 0) / 100).toFixed(2)
-    pointsWithdrawMinPoints.value = Number(response.minPoints ?? 0)
-    pointsWithdrawStepPoints.value = Number(response.stepPoints ?? 0)
-    pointsWithdrawSuccess.value = '已保存'
-    setTimeout(() => (pointsWithdrawSuccess.value = ''), 3000)
-  } catch (err: any) {
-    pointsWithdrawError.value = err.response?.data?.error || '保存失败'
-  } finally {
-    pointsWithdrawLoading.value = false
-  }
-}
-
-const getSettingsResourceLoader = (resource: SettingsResourceKey) => {
-  switch (resource) {
-    case 'apiKey':
-      return loadApiKey
-    case 'featureFlags':
-      return loadFeatureFlags
-    case 'accountRecovery':
-      return loadAccountRecoverySettings
-    case 'channels':
-      return loadChannels
-    case 'purchaseProducts':
-      return refreshPurchaseProducts
-    case 'downstreamSale':
-      return loadDownstreamSaleSettings
-    case 'emailWhitelist':
-      return loadEmailDomainWhitelist
-    case 'pointsWithdraw':
-      return loadPointsWithdrawSettings
-    case 'smtp':
-      return loadSmtpSettings
-    case 'linuxdoOauth':
-      return loadLinuxDoOAuthSettings
-    case 'linuxdoCredit':
-      return loadLinuxDoCreditSettings
-    case 'zpay':
-      return loadZpaySettings
-    case 'turnstile':
-      return loadTurnstileSettings
-    case 'telegram':
-      return loadTelegramSettings
-    case 'proxy':
-      return loadProxySettings
-    case 'upstream':
-      return loadUpstreamSettings
-  }
-}
-
-const settingsModuleResources: Record<SettingsModuleId, SettingsResourceKey[]> = {
-  general: ['emailWhitelist', 'featureFlags', 'accountRecovery'],
-  billing: ['purchaseProducts', 'channels', 'downstreamSale', 'zpay', 'pointsWithdraw'],
-  integrations: ['linuxdoOauth', 'linuxdoCredit', 'turnstile', 'telegram'],
-  upstream: ['upstream'],
-  notifications: ['smtp'],
-  security: ['apiKey', 'channels', 'proxy'],
-}
-
-const ensureSettingsResourceLoaded = async (
-  resource: SettingsResourceKey,
-  { force = false }: { force?: boolean } = {}
-) => {
-  if (!isSuperAdmin.value) return
-  if (!force && settingsResourceLoaded.value[resource]) return
-
-  if (!force) {
-    const pending = settingsResourcePromises.get(resource)
-    if (pending) {
-      await pending
-      return
-    }
-  }
-
-  const task = (async () => {
-    await getSettingsResourceLoader(resource)()
-    settingsResourceLoaded.value[resource] = true
-  })().finally(() => {
-    settingsResourcePromises.delete(resource)
-  })
-
-  settingsResourcePromises.set(resource, task)
-  await task
-}
-
-const ensureSettingsModuleLoaded = async (
-  moduleId: SettingsModuleId,
-  { force = false }: { force?: boolean } = {}
-) => {
-  if (!isSuperAdmin.value) return
-  await Promise.all(
-    settingsModuleResources[moduleId].map(resource => ensureSettingsResourceLoaded(resource, { force }))
-  )
-}
-
-watch(settingsSubTab, (next) => {
-  if (!isSuperAdmin.value || activeTab.value !== 'settings') return
-  void ensureSettingsModuleLoaded(next)
-}, { immediate: true })
-
-watch(activeTab, (next) => {
-  if (!isSuperAdmin.value || next !== 'settings') return
-  void ensureSettingsModuleLoaded(settingsSubTab.value)
+onMounted(async () => {
+  await Promise.all([
+    loadApiKey(),
+    loadEmailWhitelist(),
+    loadTurnstile(),
+    loadTelegram(),
+    loadProxy(),
+    loadChannels(),
+  ])
 })
 </script>
 
 <template>
-  <Tabs v-model="activeTab" class="space-y-8">
-    <!-- Header Actions -->
-    <Teleport v-if="teleportReady && isSuperAdmin" to="#header-actions">
-      <div class="flex items-center gap-3">
-        <TabsList class="bg-gray-100/70 border border-gray-200 rounded-xl p-1">
-          <TabsTrigger value="settings" class="rounded-lg px-4">
-            系统设置
-          </TabsTrigger>
-          <TabsTrigger value="announcements" class="rounded-lg px-4">
-            公告管理
-          </TabsTrigger>
-        </TabsList>
+  <div class="space-y-8">
+    <div>
+      <h1 class="text-2xl font-semibold text-gray-900">系统设置</h1>
+      <p class="text-sm text-gray-500">只保留当前系统仍在使用的核心配置。</p>
+    </div>
 
-        <Button
-          variant="outline"
-          :disabled="versionLoading"
-          class="h-10 px-4 border-gray-200 bg-white hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 rounded-xl transition-all"
-          @click="checkForUpdates"
-        >
-          <RefreshCw v-if="versionLoading" class="w-4 h-4 mr-2 animate-spin" />
-          <RefreshCw v-else class="w-4 h-4 mr-2" />
-          检查更新
-        </Button>
-      </div>
-    </Teleport>
-
-    <!-- 版本检查对话框 -->
-    <Dialog v-model:open="versionDialogOpen">
-      <DialogContent class="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle class="text-xl font-bold text-gray-900">版本信息</DialogTitle>
-          <DialogDescription class="text-gray-500">
-            查看当前版本和最新版本信息
-          </DialogDescription>
-        </DialogHeader>
-
-        <div class="space-y-4 py-4">
-          <div v-if="versionError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ versionError }}
-          </div>
-
-          <template v-else>
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="text-sm text-gray-500">当前版本</p>
-                <p class="font-mono font-semibold text-gray-900">{{ currentVersion?.version || '-' }}</p>
-              </div>
-            </div>
-
-            <div class="flex items-center justify-between p-4 rounded-2xl border" :class="hasNewVersion ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-100'">
-              <div class="space-y-1">
-                <p class="text-sm" :class="hasNewVersion ? 'text-green-600' : 'text-gray-500'">最新版本</p>
-                <p class="font-mono font-semibold" :class="hasNewVersion ? 'text-green-700' : 'text-gray-900'">
-                  {{ latestVersion?.version || '尚未发布' }}
-                </p>
-                <p v-if="latestVersion?.publishedAt" class="text-xs text-gray-400">
-                  发布于 {{ new Date(latestVersion.publishedAt).toLocaleDateString('zh-CN') }}
-                </p>
-              </div>
-              <div v-if="hasNewVersion" class="flex items-center gap-2">
-                <span class="px-2 py-1 text-xs font-medium text-green-700 bg-green-100 rounded-full">有新版本</span>
-              </div>
-            </div>
-
-            <div v-if="hasNewVersion && latestVersion?.htmlUrl" class="pt-2">
-              <a
-                :href="latestVersion.htmlUrl"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="inline-flex items-center justify-center w-full h-11 px-4 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-xl transition-colors"
-              >
-                前往 GitHub 查看新版本
-              </a>
-            </div>
-
-            <div v-else-if="!hasNewVersion && currentVersion" class="text-center text-sm text-gray-500 py-2">
-              已是最新版本
-            </div>
-          </template>
-        </div>
-      </DialogContent>
-    </Dialog>
-
-    <TabsContent value="settings" class="mt-0">
-      <!-- 非超级管理员提示 -->
-      <Card
-        v-if="!isSuperAdmin"
-        class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2"
-      >
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">系统设置</CardTitle>
-          <CardDescription class="text-gray-500">仅超级管理员可查看与修改系统级配置。</CardDescription>
+    <div class="grid gap-8 lg:grid-cols-2">
+      <Card class="rounded-[32px] border border-gray-100 shadow-sm">
+        <CardHeader>
+          <CardTitle>开放 API Key</CardTitle>
+          <CardDescription>用于外部封号、OpenAI OAuth 和自动化调用。</CardDescription>
         </CardHeader>
-      </Card>
-
-      <div v-else class="space-y-6">
-        <!-- 顶部分类导航 (sticky) -->
-        <div class="sticky -top-4 lg:-top-8 z-20 -mx-4 px-4 lg:-mx-8 lg:px-8 pt-4 lg:pt-8 pb-3 bg-[#F5F5F7]/90 backdrop-blur-md border-b border-gray-200/60">
-          <nav class="flex items-center gap-1.5 overflow-x-auto scrollbar-hide -mb-px">
-            <button
-              v-for="nav in settingsNav"
-              :key="nav.id"
-              @click="settingsSubTab = nav.id"
-              class="group relative flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all shrink-0"
-              :class="settingsSubTab === nav.id
-                ? 'text-blue-700 bg-blue-50'
-                : 'text-gray-500 hover:text-gray-800 hover:bg-gray-50'"
-            >
-              <component
-                :is="nav.icon"
-                class="w-4 h-4 shrink-0"
-                :class="settingsSubTab === nav.id ? 'text-blue-600' : 'text-gray-400 group-hover:text-gray-600'"
-              />
-              <span>{{ nav.label }}</span>
-            </button>
-          </nav>
-        </div>
-
-        <!-- 内容区 -->
-        <div class="space-y-6">
-          <!-- 当前分类标题 -->
-          <div class="flex items-center gap-3">
-            <div class="flex items-center justify-center w-9 h-9 rounded-xl bg-blue-50 text-blue-600">
-              <component :is="activeNavItem?.icon" class="w-[18px] h-[18px]" />
-            </div>
-            <div>
-              <h2 class="text-base font-bold text-gray-900">{{ activeNavItem?.label }}</h2>
-              <p class="text-xs text-gray-500">{{ activeNavItem?.desc }}</p>
-            </div>
-          </div>
-
-          <!-- 卡片列表 -->
-          <div class="grid gap-6 lg:grid-cols-2">
-            <template v-if="settingsSubTab === 'security'">
-            <!-- API密钥管理 -->
-      <Card
-        v-if="isSuperAdmin"
-        class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2"
-      >
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <div class="flex items-center gap-3 mb-1">
-            <div class="w-10 h-10 rounded-2xl bg-purple-50 flex items-center justify-center text-purple-600">
-              <KeyRound class="w-5 h-5" />
-            </div>
-            <CardTitle class="text-xl font-bold text-gray-900">API 密钥</CardTitle>
-          </div>
-          <CardDescription class="text-gray-500 pl-[52px]">用于外部调用API接口。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <form @submit.prevent="handleUpdateApiKey" class="space-y-5">
-            <div class="space-y-2">
-              <Label for="apiKey" class="text-xs font-semibold text-gray-500 uppercase tracking-wider">API 密钥</Label>
-              <div class="flex flex-col sm:flex-row gap-3">
-                <div class="relative w-full sm:flex-1">
-                  <Input
-                    id="apiKey"
-                    v-model="apiKey"
-                    :type="showApiKey ? 'text' : 'password'"
-                    placeholder="至少 16 个字符"
-                    required
-                    class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-100 focus:border-purple-500 transition-all font-mono text-sm"
-                  />
-                  <button
-                    type="button"
-                    @click="toggleShowApiKey"
-                    class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                  >
-                    <EyeOff v-if="showApiKey" class="h-4 w-4" />
-                    <Eye v-else class="h-4 w-4" />
-                  </button>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  @click="generateApiKey"
-                  class="w-full sm:w-auto h-11 px-4 border-gray-200 hover:bg-purple-50 hover:text-purple-600 hover:border-purple-200 rounded-xl transition-all"
-                >
-                  <Sparkles class="h-4 w-4 mr-2" />
-                  生成
-                </Button>
-              </div>
-              <p class="text-xs text-gray-400">建议使用 32 位随机字符。</p>
-            </div>
-
-            <div v-if="apiKeyError" class="rounded-xl bg-red-50 p-4 flex items-center gap-3 text-red-600 border border-red-100">
-              <AlertCircle class="w-5 h-5 flex-shrink-0" />
-              <span class="text-sm font-medium">{{ apiKeyError }}</span>
-            </div>
-
-            <div v-if="apiKeySuccess" class="rounded-xl bg-green-50 p-4 flex items-center gap-3 text-green-600 border border-green-100">
-              <CheckCircle2 class="w-5 h-5 flex-shrink-0" />
-              <span class="text-sm font-medium">{{ apiKeySuccess }}</span>
-            </div>
-
-            <Button
-              type="submit"
-              :disabled="apiKeyLoading"
-              class="w-full h-11 rounded-xl bg-purple-600 hover:bg-purple-700 text-white shadow-lg shadow-purple-200"
-            >
-              {{ apiKeyLoading ? '更新中...' : '更新 API 密钥' }}
-            </Button>
-          </form>
-
-          <div class="rounded-2xl bg-blue-50/50 border border-blue-100 p-5 space-y-2">
-            <p class="text-sm font-semibold text-blue-900 flex items-center gap-2">
-              <AlertCircle class="w-4 h-4" />
-              安全提示
-            </p>
-            <ul class="list-disc list-inside space-y-1 text-xs text-blue-700/80 pl-1">
-              <li>定期轮换密钥可提升安全性。</li>
-              <li>请勿将密钥泄露给他人。</li>
-            </ul>
-          </div>
-        </CardContent>
-      </Card>
-
-            </template>
-
-            <template v-if="settingsSubTab === 'general'">
-            <!-- 邮箱后缀白名单 -->
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">邮箱后缀白名单</CardTitle>
-          <CardDescription class="text-gray-500">用于注册时校验邮箱域名（逗号分隔）。留空表示不限制。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-5 flex-1">
+        <CardContent class="space-y-4">
           <div class="space-y-2">
-            <Label for="emailDomainWhitelist" class="text-xs font-semibold text-gray-500 uppercase tracking-wider">允许的域名</Label>
-            <Input
-              id="emailDomainWhitelist"
-              v-model="emailDomainWhitelist"
-              type="text"
-              placeholder="example.com,company.com"
-              class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-            />
-            <p class="text-xs text-gray-400">示例：example.com 或 .example.com（允许子域名）</p>
+            <Label for="api-key">API Key</Label>
+            <Input id="api-key" v-model="apiKey" class="h-11 rounded-xl" />
+            <p class="text-xs text-gray-500">当前状态：{{ apiKeyConfigured ? '已配置' : '未配置' }}</p>
           </div>
-
-          <div v-if="emailDomainWhitelistError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ emailDomainWhitelistError }}
-          </div>
-
-          <div v-if="emailDomainWhitelistSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ emailDomainWhitelistSuccess }}
-          </div>
-
-          <Button
-            type="button"
-            :disabled="emailDomainWhitelistLoading"
-            class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-            @click="saveEmailDomainWhitelist"
-          >
-            {{ emailDomainWhitelistLoading ? '保存中...' : '保存白名单' }}
+          <Button class="rounded-xl bg-black hover:bg-gray-800 text-white" :disabled="apiKeyLoading" @click="saveApiKey">
+            {{ apiKeyLoading ? '保存中...' : '保存 API Key' }}
           </Button>
         </CardContent>
       </Card>
 
-      <!-- 功能开关 -->
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">功能开关</CardTitle>
-          <CardDescription class="text-gray-500">
-            用于快速启用/禁用可选模块；禁用后相关页面/API 会返回 403 提示。
-          </CardDescription>
+      <Card class="rounded-[32px] border border-gray-100 shadow-sm">
+        <CardHeader>
+          <CardTitle>邮箱白名单</CardTitle>
+          <CardDescription>限制可用邮箱后缀，一行一个或逗号分隔。</CardDescription>
         </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-5 flex-1">
-          <div class="space-y-3">
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">小红书（订单同步/兑换）</p>
-              </div>
-              <input
-                type="checkbox"
-                v-model="featureFlags.xhs"
-                class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-            </div>
-
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">闲鱼（订单同步/兑换）</p>
-              </div>
-              <input
-                type="checkbox"
-                v-model="featureFlags.xianyu"
-                class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-            </div>
-
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">支付（ZPAY）</p>
-              </div>
-              <input
-                type="checkbox"
-                v-model="featureFlags.payment"
-                class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-            </div>
-
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">开放账号（含 Credit 订单）</p>
-              </div>
-              <input
-                type="checkbox"
-                v-model="featureFlags.openAccounts"
-                class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-            </div>
-          </div>
-
-          <div v-if="featureFlagsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ featureFlagsError }}
-          </div>
-
-          <div v-if="featureFlagsSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ featureFlagsSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl"
-              @click="loadFeatureFlags"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              :disabled="featureFlagsLoading"
-              class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              @click="saveFeatureFlags"
-            >
-              {{ featureFlagsLoading ? '保存中...' : '保存功能开关' }}
-            </Button>
-          </div>
+        <CardContent class="space-y-4">
+          <textarea v-model="emailDomainWhitelist" class="min-h-[180px] w-full rounded-2xl border border-gray-200 p-4 text-sm outline-none focus:ring-2 focus:ring-blue-100" />
+          <Button variant="outline" class="rounded-xl" :disabled="emailWhitelistLoading" @click="saveEmailWhitelist">
+            {{ emailWhitelistLoading ? '保存中...' : '保存白名单' }}
+          </Button>
         </CardContent>
       </Card>
 
-      <!-- 补录设置 -->
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">补录设置</CardTitle>
-          <CardDescription class="text-gray-500">
-            控制补录时可用兑换码的创建时间窗口，以及是否强制账号过期覆盖订单截止日。
-          </CardDescription>
+      <Card class="rounded-[32px] border border-gray-100 shadow-sm">
+        <CardHeader>
+          <CardTitle>Turnstile</CardTitle>
+          <CardDescription>仅保留验证码配置。</CardDescription>
         </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-5 flex-1">
-          <div class="space-y-3">
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">强制仅使用当天新创建的兑换码</p>
-                <p class="text-xs text-gray-500">关闭后默认使用近 7 天内创建的兑换码（可自定义）。</p>
-              </div>
-              <input
-                type="checkbox"
-                v-model="accountRecoveryForceTodayCodes"
-                class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-            </div>
-
-            <div v-if="!accountRecoveryForceTodayCodes" class="space-y-2 p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <Label for="accountRecoveryCodeWindowDays" class="text-xs font-semibold text-gray-500 uppercase tracking-wider">兑换码创建范围（天）</Label>
-              <Input
-                id="accountRecoveryCodeWindowDays"
-                v-model="accountRecoveryCodeWindowDays"
-                type="number"
-                min="1"
-                max="365"
-                placeholder="7"
-                class="h-11 bg-white border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-              />
-              <p class="text-xs text-gray-400">例如 7 表示允许使用近 7 天内创建的补录码。</p>
-            </div>
-
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">要求账号过期时间覆盖订单截止日</p>
-                <p class="text-xs text-gray-500">仅在开启“强制当天码”时可用；否则后端会强制关闭。</p>
-              </div>
-              <input
-                type="checkbox"
-                v-model="accountRecoveryRequireExpireCoverDeadline"
-                :disabled="!accountRecoveryForceTodayCodes"
-                class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              />
-            </div>
+        <CardContent class="space-y-4">
+          <div class="space-y-2">
+            <Label for="turnstile-site-key">Site Key</Label>
+            <Input id="turnstile-site-key" v-model="turnstileSiteKey" class="h-11 rounded-xl" />
           </div>
-
-          <div v-if="accountRecoverySettingsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ accountRecoverySettingsError }}
+          <div class="space-y-2">
+            <Label for="turnstile-secret-key">Secret Key</Label>
+            <Input id="turnstile-secret-key" v-model="turnstileSecretKey" class="h-11 rounded-xl" type="password" />
+            <p class="text-xs text-gray-500">当前 Secret：{{ turnstileSecretSet ? '已配置' : '未配置' }}；状态：{{ turnstileEnabled ? '已启用' : '未启用' }}</p>
           </div>
-
-          <div v-if="accountRecoverySettingsSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ accountRecoverySettingsSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl"
-              @click="loadAccountRecoverySettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              :disabled="accountRecoverySettingsLoading"
-              class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              @click="saveAccountRecoverySettings"
-            >
-              {{ accountRecoverySettingsLoading ? '保存中...' : '保存补录设置' }}
-            </Button>
-          </div>
+          <Button variant="outline" class="rounded-xl" :disabled="turnstileLoading" @click="saveTurnstile">
+            {{ turnstileLoading ? '保存中...' : '保存 Turnstile' }}
+          </Button>
         </CardContent>
       </Card>
 
-            </template>
-
-            <template v-if="settingsSubTab === 'security'">
-            <!-- 渠道管理 -->
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">渠道管理</CardTitle>
-          <CardDescription class="text-gray-500">
-            新增/停用渠道，并配置是否允许回退通用码与参与下游售码库存；新增渠道默认使用通用兑换页（/redeem/&lt;key&gt;）。
-          </CardDescription>
+      <Card class="rounded-[32px] border border-gray-100 shadow-sm">
+        <CardHeader>
+          <CardTitle>Telegram</CardTitle>
+          <CardDescription>保留 Bot、白名单和通知配置。</CardDescription>
         </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-5 flex-1">
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" :disabled="channelsLoading" @click="loadChannels">
-              {{ channelsLoading ? '加载中...' : '刷新' }}
-            </Button>
-            <Button type="button" class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="openCreateChannelDialog">
-              新增渠道
-            </Button>
+        <CardContent class="space-y-4">
+          <div class="space-y-2">
+            <Label for="telegram-user-ids">允许的用户 ID</Label>
+            <Input id="telegram-user-ids" v-model="telegramAllowedUserIds" class="h-11 rounded-xl" />
           </div>
-
-          <div v-if="channelsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ channelsError }}
+          <div class="space-y-2">
+            <Label for="telegram-token">Bot Token</Label>
+            <Input id="telegram-token" v-model="telegramBotToken" class="h-11 rounded-xl" type="password" />
+            <p class="text-xs text-gray-500">当前 Token：{{ telegramTokenSet ? '已配置' : '未配置' }}</p>
           </div>
-          <div v-if="channelsSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ channelsSuccess }}
+          <div class="space-y-2">
+            <Label for="telegram-chat-ids">通知 Chat IDs</Label>
+            <Input id="telegram-chat-ids" v-model="telegramNotifyChatIds" class="h-11 rounded-xl" />
           </div>
-
-          <div class="overflow-x-auto border border-gray-100 rounded-2xl">
-            <table class="min-w-full text-sm">
-              <thead class="bg-gray-50">
-                <tr class="text-left text-gray-500">
-                  <th class="px-4 py-3 font-semibold">Key</th>
-                  <th class="px-4 py-3 font-semibold">名称</th>
-                  <th class="px-4 py-3 font-semibold">模式</th>
-                  <th class="px-4 py-3 font-semibold">Provider</th>
-                  <th class="px-4 py-3 font-semibold">回退通用码</th>
-                  <th class="px-4 py-3 font-semibold">下游售码</th>
-                  <th class="px-4 py-3 font-semibold">状态</th>
-                  <th class="px-4 py-3 font-semibold">兑换链接</th>
-                  <th class="px-4 py-3 font-semibold text-right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="channel in channels" :key="channel.key" class="border-t border-gray-100">
-                  <td class="px-4 py-3 font-mono text-gray-900">{{ channel.key }}</td>
-                  <td class="px-4 py-3 text-gray-900">{{ channel.name }}</td>
-                  <td class="px-4 py-3 font-mono text-gray-700">{{ channel.redeemMode }}</td>
-                  <td class="px-4 py-3 font-mono text-gray-700">{{ channel.providerType }}</td>
-                  <td class="px-4 py-3">
-                    <span class="px-2 py-1 rounded-full text-xs font-medium" :class="channel.allowCommonFallback ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'">
-                      {{ channel.allowCommonFallback ? '允许' : '不允许' }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3">
-                    <span class="px-2 py-1 rounded-full text-xs font-medium" :class="channel.allowDownstreamSale ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'">
-                      {{ channel.allowDownstreamSale ? '参与共享库存' : '不参与' }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3">
-                    <span class="px-2 py-1 rounded-full text-xs font-medium" :class="channel.isActive ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'">
-                      {{ channel.isActive ? '启用' : '停用' }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3 font-mono text-gray-700">/redeem/{{ channel.key }}</td>
-                  <td class="px-4 py-3">
-                    <div class="flex items-center justify-end gap-2">
-                      <Button type="button" variant="outline" class="h-9 px-3 border-gray-200 rounded-xl" @click="openEditChannelDialog(channel)">
-                        编辑
-                      </Button>
-                      <Button type="button" variant="outline" class="h-9 px-3 border-gray-200 rounded-xl" @click="toggleChannelActive(channel)">
-                        {{ channel.isActive ? '停用' : '启用' }}
-                      </Button>
-                      <Button v-if="!channel.isBuiltin" type="button" variant="outline" class="h-9 px-3 border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 rounded-xl" @click="deleteChannel(channel)">
-                        删除
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-                <tr v-if="!channels.length">
-                  <td colspan="9" class="px-4 py-6 text-center text-gray-400">暂无渠道数据</td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div class="space-y-2">
+              <Label for="telegram-timeout">通知超时(ms)</Label>
+              <Input id="telegram-timeout" v-model="telegramNotifyTimeoutMs" class="h-11 rounded-xl" />
+            </div>
+            <div class="space-y-2">
+              <Label for="telegram-enabled">通知开关</Label>
+              <select id="telegram-enabled" v-model="telegramNotifyEnabled" class="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm">
+                <option :value="true">开启</option>
+                <option :value="false">关闭</option>
+              </select>
+            </div>
           </div>
+          <Button variant="outline" class="rounded-xl" :disabled="telegramLoading" @click="saveTelegram">
+            {{ telegramLoading ? '保存中...' : '保存 Telegram 配置' }}
+          </Button>
         </CardContent>
       </Card>
 
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">全局代理配置</CardTitle>
-          <!-- <CardDescription class="text-gray-500">统一配置 `OPEN_ACCOUNTS_SWEEPER_PROXY_URLS`，每个代理单独编辑，并在同一处逐个测试 chatgpt.com 连通性。</CardDescription> -->
+      <Card class="rounded-[32px] border border-gray-100 shadow-sm lg:col-span-2">
+        <CardHeader>
+          <CardTitle>代理池</CardTitle>
+          <CardDescription>用于 OpenAI 同步、邀请和超员扫描。</CardDescription>
         </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="rounded-2xl border border-gray-100 bg-gray-50/60 p-4">
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <!-- <div class="space-y-1">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">OPEN_ACCOUNTS_SWEEPER_PROXY_URLS</Label>
-                <p class="text-sm text-gray-600">配置和连通性测试放在一起；保存写入系统设置，测试直接使用当前页面里的草稿。</p>
-              </div> -->
-              <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                <span class="rounded-full bg-white px-3 py-1.5 border border-gray-200">已填写 {{ proxyDraftCount }} 行</span>
-                <span class="rounded-full bg-white px-3 py-1.5 border border-gray-200">当前有效 {{ proxyEffectiveCount }} 条</span>
-                <!-- <span class="rounded-full bg-white px-3 py-1.5 border border-gray-200">{{ proxyStored ? '来源：系统设置' : '来源：环境变量回退或未配置' }}</span> -->
-              </div>
-            </div>
-          </div>
-
-          <div v-if="proxyError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ proxyError }}
-          </div>
-
-          <div v-if="proxySuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ proxySuccess }}
-          </div>
-
-          <div class="rounded-2xl border border-gray-100 bg-gray-50/60 p-4 space-y-4">
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <p class="text-sm font-semibold text-gray-900">代理列表</p>
-                <!-- <p class="text-xs text-gray-500">一行一个代理，可新增、删除；测试结果会直接贴在对应那一行。</p> -->
-              </div>
-              <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                <span class="rounded-full bg-white px-3 py-1.5 border border-gray-200">总数 {{ proxyTestTotal }}</span>
-                <span class="rounded-full bg-green-50 px-3 py-1.5 border border-green-100 text-green-700">通过 {{ proxyTestPassed }}</span>
-                <span class="rounded-full bg-red-50 px-3 py-1.5 border border-red-100 text-red-700">失败 {{ proxyTestFailed }}</span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  class="h-9 rounded-xl border-gray-200 bg-white px-3"
-                  :disabled="proxyLoading || proxyTesting"
-                  @click="addProxyRow"
-                >
-                  <Plus class="mr-2 h-4 w-4" />
-                  新增代理
-                </Button>
-              </div>
-            </div>
-
-            <div class="space-y-3">
-              <div
-                v-for="(row, index) in proxyRows"
-                :key="row.id"
-                class="rounded-2xl border border-gray-200 bg-white/90 p-4"
-              >
-                <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                  <div
-                    class="min-w-0 flex-1 space-y-3"
-                  >
-                    <div class="flex flex-wrap items-center gap-2">
-                      <p class="font-medium text-gray-900">代理 {{ index + 1 }}</p>
-                      <template v-if="getProxyRowResult(row.value)">
-                        <span
-                          class="shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium"
-                          :class="getProxyRowResult(row.value)?.ok ? 'bg-green-100 text-green-700' : (getProxyRowResult(row.value)?.reachable ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700')"
-                        >
-                          {{ getProxyRowResult(row.value)?.ok ? '通过' : (getProxyRowResult(row.value)?.reachable ? '受限' : '失败') }}
-                        </span>
-                        <span class="text-xs text-gray-500">HTTP {{ getProxyRowResult(row.value)?.status || '-' }}</span>
-                        <span class="text-xs text-gray-500">{{ getProxyRowResult(row.value)?.durationMs }} ms</span>
-                      </template>
-                      <span
-                        v-else-if="proxyTesting && row.value.trim()"
-                        class="shrink-0 inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700"
-                      >
-                        测试中
-                      </span>
-                      <span
-                        v-else-if="row.value.trim()"
-                        class="shrink-0 inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-500"
-                      >
-                        未测试
-                      </span>
-                      <span
-                        v-else
-                        class="shrink-0 inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
-                      >
-                        待填写
-                      </span>
-                    </div>
-
-                    <Input
-                      v-model="row.value"
-                      type="text"
-                      placeholder="socks5h://127.0.0.1:1080 或 http://user:pass@127.0.0.1:8080"
-                      class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                      :disabled="proxyLoading || proxyTesting"
-                    />
-
-                    <p v-if="getProxyRowResult(row.value)" class="text-xs break-all" :class="getProxyRowResult(row.value)?.ok ? 'text-green-700' : (getProxyRowResult(row.value)?.reachable ? 'text-orange-700' : 'text-red-700')">
-                      {{ getProxyRowResult(row.value)?.message }}
-                    </p>
-                    <!-- <p v-else class="text-xs text-gray-400">支持 `http`、`https`、`socks4`、`socks4a`、`socks5`、`socks5h`。</p> -->
-                    <p v-if="getProxyRowResult(row.value)?.bodySnippet" class="text-[12px] text-gray-500 break-all">
-                      {{ getProxyRowResult(row.value)?.bodySnippet }}
-                    </p>
-                  </div>
-
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-9 rounded-xl px-3 text-gray-600"
-                    :disabled="proxyLoading || proxyTesting"
-                    @click="removeProxyRow(index)"
-                  >
-                    <Trash2 class="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="proxyLoading || proxyTesting"
-              @click="loadProxySettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl border-gray-200"
-              :disabled="proxyLoading || proxyTesting"
-              @click="testProxySettings"
-            >
-              {{ proxyTesting ? '测试中...' : 'chatgpt.com连通性测试' }}
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="proxyLoading || proxyTesting"
-              @click="saveProxySettings"
-            >
+        <CardContent class="space-y-4">
+          <textarea v-model="proxyUrls" class="min-h-[180px] w-full rounded-2xl border border-gray-200 p-4 text-sm outline-none focus:ring-2 focus:ring-blue-100" placeholder="一行一个代理地址" />
+          <div class="flex flex-wrap items-center gap-3">
+            <Button variant="outline" class="rounded-xl" :disabled="proxyLoading" @click="saveProxy">
               {{ proxyLoading ? '保存中...' : '保存代理配置' }}
             </Button>
+            <Button variant="outline" class="rounded-xl" :disabled="proxyTesting" @click="testProxy">
+              {{ proxyTesting ? '测试中...' : '测试代理' }}
+            </Button>
+            <span class="text-sm text-gray-500">有效代理数：{{ proxyEffectiveCount }}</span>
+          </div>
+          <div v-if="proxyTestResults.length" class="space-y-3">
+            <div v-for="result in proxyTestResults" :key="result.proxy" class="rounded-2xl border border-gray-100 px-4 py-3 text-sm">
+              <div class="font-medium text-gray-900">{{ result.proxy }}</div>
+              <div class="text-gray-500">{{ result.message }}</div>
+            </div>
           </div>
         </CardContent>
       </Card>
 
-            </template>
-
-            <template v-if="settingsSubTab === 'billing'">
-            <!-- 支付商品管理 -->
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">支付商品管理</CardTitle>
-          <CardDescription class="text-gray-500">
-            配置商品价格/服务期/订单类型以及渠道优先级（codeChannels），下单时系统会按优先级自动匹配有库存的渠道并锁定。
-          </CardDescription>
+      <Card class="rounded-[32px] border border-gray-100 shadow-sm lg:col-span-2">
+        <CardHeader class="flex flex-row items-center justify-between gap-4">
+          <div>
+            <CardTitle>兑换渠道</CardTitle>
+            <CardDescription>保留通用兑换与可选扩展渠道。</CardDescription>
+          </div>
+          <Button class="rounded-xl bg-black hover:bg-gray-800 text-white" @click="openCreateChannelDialog">新增渠道</Button>
         </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-5 flex-1">
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" :disabled="purchaseProductsLoading" @click="refreshPurchaseProducts">
-              {{ purchaseProductsLoading ? '加载中...' : '刷新' }}
-            </Button>
-            <Button type="button" class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="openCreatePurchaseProductDialog">
-              新增商品
-            </Button>
-          </div>
-
-          <div v-if="purchaseProductsError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ purchaseProductsError }}
-          </div>
-          <div v-if="purchaseProductsSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ purchaseProductsSuccess }}
-          </div>
-
-          <div class="overflow-x-auto border border-gray-100 rounded-2xl">
-            <table class="min-w-full text-sm">
-              <thead class="bg-gray-50">
-                <tr class="text-left text-gray-500">
-                  <th class="px-4 py-3 font-semibold">Key</th>
-                  <th class="px-4 py-3 font-semibold">名称</th>
-                  <th class="px-4 py-3 font-semibold">价格</th>
-                  <th class="px-4 py-3 font-semibold">服务期</th>
-                  <th class="px-4 py-3 font-semibold">类型</th>
-                  <th class="px-4 py-3 font-semibold">渠道策略</th>
-                  <th class="px-4 py-3 font-semibold">库存</th>
-                  <th class="px-4 py-3 font-semibold">状态</th>
-                  <th class="px-4 py-3 font-semibold text-right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="product in purchaseProducts" :key="product.productKey" class="border-t border-gray-100">
-                  <td class="px-4 py-3 font-mono text-gray-900">{{ product.productKey }}</td>
-                  <td class="px-4 py-3 text-gray-900">{{ product.productName }}</td>
-                  <td class="px-4 py-3 font-mono text-gray-700">¥ {{ product.amount }}</td>
-                  <td class="px-4 py-3 text-gray-700">{{ product.serviceDays }} 天</td>
-                  <td class="px-4 py-3">
-                    <span class="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">{{ product.orderType }}</span>
-                  </td>
-                  <td class="px-4 py-3 font-mono text-gray-700">{{ product.codeChannels }}</td>
-                  <td class="px-4 py-3 font-mono text-gray-700">{{ purchaseAvailability[product.productKey] ?? '-' }}</td>
-                  <td class="px-4 py-3">
-                    <span class="px-2 py-1 rounded-full text-xs font-medium" :class="product.isActive ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'">
-                      {{ product.isActive ? '上架' : '下架' }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3">
-                    <div class="flex items-center justify-end gap-2">
-                      <Button type="button" variant="outline" class="h-9 px-3 border-gray-200 rounded-xl" @click="openEditPurchaseProductDialog(product)">
-                        编辑
-                      </Button>
-                      <Button type="button" variant="outline" class="h-9 px-3 border-gray-200 rounded-xl" @click="togglePurchaseProductActive(product)">
-                        {{ product.isActive ? '停用' : '启用' }}
-                      </Button>
-                      <Button type="button" variant="outline" class="h-9 px-3 border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 rounded-xl" @click="deletePurchaseProduct(product)">
-                        删除
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-                <tr v-if="!purchaseProducts.length">
-                  <td colspan="9" class="px-4 py-6 text-center text-gray-400">暂无商品数据</td>
-                </tr>
-              </tbody>
-            </table>
+        <CardContent class="space-y-4">
+          <div v-if="channelsLoading" class="text-sm text-gray-500">加载中...</div>
+          <div v-else class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="channel in channels" :key="channel.key" class="rounded-2xl border border-gray-100 p-5 space-y-3">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="font-semibold text-gray-900">{{ channel.name }}</div>
+                  <div class="text-xs text-gray-500">{{ channel.key }}</div>
+                </div>
+                <span class="text-xs rounded-full px-2 py-1" :class="channel.isActive ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'">
+                  {{ channel.isActive ? '启用' : '停用' }}
+                </span>
+              </div>
+              <div class="text-sm text-gray-600">模式：{{ channel.redeemMode }} / Provider：{{ channel.providerType }}</div>
+              <div class="flex items-center gap-2">
+                <Button variant="outline" class="rounded-xl" @click="openEditChannelDialog(channel)">编辑</Button>
+                <Button variant="outline" class="rounded-xl" @click="toggleChannel(channel)">{{ channel.isActive ? '停用' : '启用' }}</Button>
+                <Button v-if="!channel.isBuiltin" variant="outline" class="rounded-xl text-red-600 border-red-200" @click="deleteChannel(channel)">删除</Button>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>
+    </div>
 
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">下游售码配置</CardTitle>
-          <CardDescription class="text-gray-500">
-            下游公开页固定为 <span class="font-mono text-gray-700">/downstream</span>，库存自动复用所有开启“下游售码”的渠道共享库存。
-          </CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="flex items-center justify-between rounded-2xl border border-gray-100 bg-gray-50 p-4">
-            <div class="space-y-1">
-              <p class="font-medium text-gray-900">启用下游公开售码页</p>
-              <p class="text-xs text-gray-500">关闭后，/downstream 仅返回未启用状态，不再接受新下单。</p>
-            </div>
-            <input
-              v-model="downstreamSaleEnabled"
-              type="checkbox"
-              class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
-            />
-          </div>
-
-          <div class="grid gap-4 lg:grid-cols-2">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">商品名称</Label>
-              <Input
-                v-model="downstreamSaleProductName"
-                type="text"
-                placeholder="下游渠道兑换码"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all"
-                :disabled="downstreamSaleLoading"
-              />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">统一售价（元）</Label>
-              <Input
-                v-model="downstreamSaleAmount"
-                type="text"
-                placeholder="9.90"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono"
-                :disabled="downstreamSaleLoading"
-              />
-            </div>
-          </div>
-
-          <div class="grid gap-3 sm:grid-cols-2">
-            <label class="flex items-center justify-between rounded-2xl border border-gray-100 bg-gray-50 p-4">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">支付宝</p>
-                <p class="text-xs text-gray-500">下游页展示支付宝支付</p>
-              </div>
-              <input
-                v-model="downstreamSalePayAlipayEnabled"
-                type="checkbox"
-                class="w-5 h-5 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-            </label>
-
-            <label class="flex items-center justify-between rounded-2xl border border-gray-100 bg-gray-50 p-4">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">微信支付</p>
-                <p class="text-xs text-gray-500">下游页展示微信支付</p>
-              </div>
-              <input
-                v-model="downstreamSalePayWxpayEnabled"
-                type="checkbox"
-                class="w-5 h-5 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
-              />
-            </label>
-          </div>
-
-          <div class="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4 text-sm text-emerald-900">
-            下游页会按这里的配置动态展示支付方式，支付宝和微信至少保留一个。
-          </div>
-
-          <div v-if="downstreamSaleError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ downstreamSaleError }}
-          </div>
-
-          <div v-if="downstreamSaleSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ downstreamSaleSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="downstreamSaleLoading"
-              @click="loadDownstreamSaleSettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="downstreamSaleLoading"
-              @click="saveDownstreamSaleSettings"
-            >
-              {{ downstreamSaleLoading ? '保存中...' : '保存下游售码配置' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-            </template>
-
-            <template v-if="settingsSubTab === 'notifications'">
-            <!-- SMTP / 第三方配置 -->
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">SMTP 邮件告警配置</CardTitle>
-          <CardDescription class="text-gray-500">用于发送验证码/订单邮件/系统告警邮件（保存后实时生效）。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="grid gap-4 lg:grid-cols-3">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">SMTP Host</Label>
-              <Input
-                v-model="smtpHost"
-                type="text"
-                placeholder="smtp.example.com"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="smtpLoading"
-              />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">端口</Label>
-              <Input
-                v-model="smtpPort"
-                type="text"
-                placeholder="465"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="smtpLoading"
-              />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">安全连接</Label>
-              <Select v-model="smtpSecure" :disabled="smtpLoading">
-                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all">
-                  <SelectValue placeholder="选择" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="true">启用 TLS/SSL</SelectItem>
-                  <SelectItem value="false">不启用 TLS/SSL</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div class="grid gap-4 lg:grid-cols-3">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">用户名</Label>
-              <Input
-                v-model="smtpUser"
-                type="text"
-                placeholder="bot@example.com"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="smtpLoading"
-              />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">密码</Label>
-              <div class="relative">
-                <Input
-                  v-model="smtpPass"
-                  :type="showSmtpPass ? 'text' : 'password'"
-                  placeholder="留空表示不修改"
-                  class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                  :disabled="smtpLoading"
-                />
-                <button
-                  type="button"
-                  @click="toggleShowSmtpPass"
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  <EyeOff v-if="showSmtpPass" class="h-4 w-4" />
-                  <Eye v-else class="h-4 w-4" />
-                </button>
-              </div>
-              <p class="text-xs text-gray-400">
-                <template v-if="smtpPassStored">密码已入库；留空表示不修改。</template>
-                <template v-else-if="smtpPassSet">当前密码未入库；保存时可自动从 .env 迁移或在此重新填写。</template>
-                <template v-else>未设置密码。</template>
-              </p>
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">发件人 From</Label>
-              <Input
-                v-model="smtpFrom"
-                type="text"
-                placeholder="留空则使用 SMTP_USER"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all text-sm"
-                :disabled="smtpLoading"
-              />
-            </div>
-          </div>
-
+    <Dialog v-model:open="channelDialogOpen">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{{ channelDialogMode === 'create' ? '新增渠道' : '编辑渠道' }}</DialogTitle>
+          <DialogDescription>配置兑换渠道的基础属性。</DialogDescription>
+        </DialogHeader>
+        <div class="space-y-4">
           <div class="space-y-2">
-            <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">告警收件人（ADMIN_ALERT_EMAIL）</Label>
-            <Input
-              v-model="adminAlertEmail"
-              type="text"
-              placeholder="admin@example.com,ops@example.com"
-              class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-              :disabled="smtpLoading"
-            />
-            <p class="text-xs text-gray-400">多个收件人用逗号分隔；留空则不发送系统告警邮件。</p>
+            <Label for="channel-key">渠道 Key</Label>
+            <Input id="channel-key" v-model="channelFormKey" :disabled="channelDialogMode === 'edit'" class="h-11 rounded-xl" />
           </div>
-
-          <div v-if="smtpError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ smtpError }}
+          <div class="space-y-2">
+            <Label for="channel-name">渠道名称</Label>
+            <Input id="channel-name" v-model="channelFormName" class="h-11 rounded-xl" />
           </div>
-
-          <div v-if="smtpSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ smtpSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="smtpLoading"
-              @click="loadSmtpSettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="smtpLoading"
-              @click="saveSmtpSettings"
-            >
-              {{ smtpLoading ? '保存中...' : '保存 SMTP 配置' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      </template>
-
-      <template v-if="settingsSubTab === 'integrations'">
-      <!-- Linux DO OAuth 配置 -->
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">Linux DO OAuth 配置</CardTitle>
-          <CardDescription class="text-gray-500">用于 Linux DO 登录/授权（保存后实时生效）。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="grid gap-4">
+          <div class="grid gap-4 sm:grid-cols-2">
             <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Client ID</Label>
-              <Input
-                v-model="linuxdoClientId"
-                type="text"
-                placeholder="Linux DO Client ID"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="linuxdoOauthLoading"
-              />
+              <Label for="channel-redeem-mode">兑换模式</Label>
+              <select id="channel-redeem-mode" v-model="channelFormRedeemMode" class="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm">
+                <option value="code">code</option>
+                <option value="external-card">external-card</option>
+              </select>
             </div>
             <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Client Secret</Label>
-              <div class="relative">
-                <Input
-                  v-model="linuxdoClientSecret"
-                  :type="showLinuxdoClientSecret ? 'text' : 'password'"
-                  placeholder="留空表示不修改"
-                  class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                  :disabled="linuxdoOauthLoading"
-                />
-                <button
-                  type="button"
-                  @click="toggleShowLinuxdoClientSecret"
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  <EyeOff v-if="showLinuxdoClientSecret" class="h-4 w-4" />
-                  <Eye v-else class="h-4 w-4" />
-                </button>
-              </div>
-              <p class="text-xs text-gray-400">
-                <template v-if="linuxdoClientSecretStored">Client Secret 已入库；留空表示不修改。</template>
-                <template v-else-if="linuxdoClientSecretSet">Client Secret 未入库；保存时可从 .env 自动迁移或在此重新填写。</template>
-                <template v-else>未设置 Client Secret。</template>
-              </p>
+              <Label for="channel-provider-type">Provider</Label>
+              <select id="channel-provider-type" v-model="channelFormProviderType" class="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm">
+                <option value="local">local</option>
+                <option value="custom-http">custom-http</option>
+                <option value="platform-upstream">platform-upstream</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div class="space-y-2">
+              <Label for="channel-sort-order">排序</Label>
+              <Input id="channel-sort-order" v-model="channelFormSortOrder" class="h-11 rounded-xl" />
             </div>
             <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Redirect URI</Label>
-              <Input
-                v-model="linuxdoRedirectUri"
-                type="text"
-                placeholder="https://example.com/redeem/linux-do"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all text-sm font-mono"
-                :disabled="linuxdoOauthLoading"
-              />
+              <Label for="channel-active">状态</Label>
+              <select id="channel-active" v-model="channelFormIsActive" class="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm">
+                <option :value="true">启用</option>
+                <option :value="false">停用</option>
+              </select>
             </div>
           </div>
-
-          <div v-if="linuxdoOauthError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ linuxdoOauthError }}
-          </div>
-
-          <div v-if="linuxdoOauthSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ linuxdoOauthSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="linuxdoOauthLoading"
-              @click="loadLinuxDoOAuthSettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="linuxdoOauthLoading"
-              @click="saveLinuxDoOAuthSettings"
-            >
-              {{ linuxdoOauthLoading ? '保存中...' : '保存 Linux DO OAuth 配置' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">Linux DO Credit 配置</CardTitle>
-          <CardDescription class="text-gray-500">用于 Credit 积分支付/回调验签（保存后实时生效）。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="grid gap-4 lg:grid-cols-2">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">PID</Label>
-              <Input
-                v-model="linuxdoCreditPid"
-                type="text"
-                placeholder="Credit PID"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="linuxdoCreditLoading"
-              />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">KEY</Label>
-              <div class="relative">
-                <Input
-                  v-model="linuxdoCreditKey"
-                  :type="showLinuxdoCreditKey ? 'text' : 'password'"
-                  placeholder="留空表示不修改"
-                  class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                  :disabled="linuxdoCreditLoading"
-                />
-                <button
-                  type="button"
-                  @click="toggleShowLinuxdoCreditKey"
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  <EyeOff v-if="showLinuxdoCreditKey" class="h-4 w-4" />
-                  <Eye v-else class="h-4 w-4" />
-                </button>
-              </div>
-              <p class="text-xs text-gray-400">
-                <template v-if="linuxdoCreditKeyStored">KEY 已入库；留空表示不修改。</template>
-                <template v-else-if="linuxdoCreditKeySet">KEY 未入库；保存时可从 .env 自动迁移或在此重新填写。</template>
-                <template v-else>未设置 KEY。</template>
-              </p>
-            </div>
-          </div>
-
-          <div v-if="linuxdoCreditError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ linuxdoCreditError }}
-          </div>
-
-          <div v-if="linuxdoCreditSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ linuxdoCreditSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="linuxdoCreditLoading"
-              @click="loadLinuxDoCreditSettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="linuxdoCreditLoading"
-              @click="saveLinuxDoCreditSettings"
-            >
-              {{ linuxdoCreditLoading ? '保存中...' : '保存 Linux DO Credit 配置' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      </template>
-
-      <template v-if="settingsSubTab === 'upstream'">
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">上下游接口配置</CardTitle>
-          <CardDescription class="text-gray-500">出站用于把卡密提交到上游平台，入站用于让不同下游实例通过标准接口调用当前平台；下游映射码也走这套入站接口。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 space-y-3">
-            <div class="flex items-center gap-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">本站域名</Label>
-              <InfoTooltip content="保存后会同时用于平台通用接口出站时自动携带下游域名，以及支付/开放账号相关回调地址生成。留空则继续按请求或环境变量自动推导。" width-class="w-96" />
-            </div>
-            <Input
-              v-model="upstreamPublicBaseUrl"
-              type="text"
-              placeholder="https://example.com"
-              class="h-11 bg-white border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-              :disabled="upstreamLoading"
-            />
-          </div>
-
-          <Tabs v-model="upstreamConfigTab" class="space-y-6">
-            <div class="rounded-2xl border border-gray-200 bg-gray-50/80 p-2">
-              <TabsList class="grid h-auto w-full grid-cols-2 gap-2 bg-transparent p-0">
-                <TabsTrigger value="outbound" class="rounded-xl px-4 py-3">出站履约</TabsTrigger>
-                <TabsTrigger value="inbound" class="rounded-xl px-4 py-3">入站接口</TabsTrigger>
-              </TabsList>
-            </div>
-
-            <TabsContent value="outbound" class="mt-0 space-y-6">
-              <div class="rounded-2xl border border-blue-100 bg-blue-50/60 p-4 text-sm text-blue-900">
-                <div class="flex items-start gap-2">
-                  <div class="mt-0.5 h-2.5 w-2.5 rounded-full bg-blue-500"></div>
-                  <div class="space-y-1">
-                    <p class="font-semibold">出站履约会在兑换或支付成功后触发。</p>
-                  </div>
-                </div>
-              </div>
-
-              <div class="grid gap-4 lg:grid-cols-2">
-                <div class="space-y-2">
-                  <div class="flex items-center gap-2">
-                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">出站履约开关</Label>
-                    <InfoTooltip content="关闭后，所有 external-card 渠道都不会向外部系统发起请求。" width-class="w-64" />
-                  </div>
-                  <Select v-model="upstreamProviderEnabled" :disabled="upstreamLoading">
-                    <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
-                      <SelectValue placeholder="选择状态" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="true">启用</SelectItem>
-                      <SelectItem value="false">禁用</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div class="space-y-2">
-                  <div class="flex items-center gap-2">
-                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Provider 类型</Label>
-                    <InfoTooltip content="自定义接口适合任意第三方 JSON 接口；平台通用接口适合同项目实例之间对接，固定调用 /api/upstream/cards/redeem。" width-class="w-72" />
-                  </div>
-                  <Select v-model="upstreamProviderType" :disabled="upstreamLoading">
-                    <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
-                      <SelectValue placeholder="选择 Provider" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="custom-http">自定义接口</SelectItem>
-                      <SelectItem value="platform-upstream">平台通用接口</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              <div class="grid gap-4 lg:grid-cols-2">
-                <div class="space-y-2">
-                  <div class="flex items-center gap-2">
-                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">供应商名称</Label>
-                    <InfoTooltip content="仅用于后台识别来源，用户前台不会展示这个名字。" width-class="w-60" />
-                  </div>
-                  <Input
-                    v-model="upstreamSupplierName"
-                    type="text"
-                    placeholder="例如：供应商 A"
-                    class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all text-sm"
-                    :disabled="upstreamLoading"
-                  />
-                </div>
-
-                <div class="space-y-2">
-                  <div class="flex items-center gap-2">
-                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">请求超时（毫秒）</Label>
-                    <InfoTooltip content="外部接口超时后本次履约会失败，支付订单会保留为已支付未开通，可在修复配置后通过订单刷新重试。" width-class="w-80" />
-                  </div>
-                  <Input
-                    v-model="upstreamTimeoutMs"
-                    type="text"
-                    placeholder="15000"
-                    class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                    :disabled="upstreamLoading"
-                  />
-                </div>
-              </div>
-
-              <div v-if="isCustomUpstreamProvider" class="space-y-4">
-                <div class="space-y-2">
-                  <div class="flex items-center gap-2">
-                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">自定义接口 URL</Label>
-                    <InfoTooltip content="填写完整的请求地址。系统会用 POST + application/json 调用这里。" width-class="w-64" />
-                  </div>
-                  <Input
-                    v-model="upstreamCustomUrl"
-                    type="text"
-                    placeholder="https://partner.example.com/api/redeem"
-                    class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                    :disabled="upstreamLoading"
-                  />
-                </div>
-
-                <div class="space-y-2">
-                  <div class="flex items-center gap-2">
-                    <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">自定义 Body JSON</Label>
-                    <InfoTooltip :content="`系统会先替换占位符，再按 JSON 发送。\n${upstreamPlaceholderHelp}`" width-class="w-80" />
-                  </div>
-                  <textarea
-                    v-model="upstreamCustomBodyTemplate"
-                    rows="8"
-                    placeholder='{"userEmail":"{{email}}","cardCode":"{{code}}"}'
-                    class="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 font-mono text-sm text-gray-900 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                    :disabled="upstreamLoading"
-                  ></textarea>
-                  <p class="text-xs text-gray-400">
-                    {{ upstreamPlaceholderHelp }}
-                  </p>
-                </div>
-              </div>
-
-              <div v-else-if="isPlatformUpstreamProvider" class="space-y-4">
-                <div class="grid gap-4 lg:grid-cols-2">
-                  <div class="space-y-2">
-                    <div class="flex items-center gap-2">
-                      <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">平台 Base URL</Label>
-                      <InfoTooltip content="填写对方平台的根地址，系统会自动拼接标准路径 /api/upstream/cards/redeem。" width-class="w-72" />
-                    </div>
-                    <Input
-                      v-model="upstreamBaseUrl"
-                      type="text"
-                      placeholder="https://partner.example.com"
-                      class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                      :disabled="upstreamLoading"
-                    />
-                  </div>
-
-                  <div class="space-y-2">
-                    <div class="flex items-center gap-2">
-                      <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">出站 API Key</Label>
-                      <InfoTooltip content="如果对方平台启用了入站 API 密钥，这里填写对应的出站密钥。" width-class="w-72" />
-                    </div>
-                    <div class="relative">
-                      <Input
-                        v-model="upstreamOutboundApiKey"
-                        :type="showUpstreamOutboundApiKey ? 'text' : 'password'"
-                        placeholder="留空表示不修改"
-                        class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                        :disabled="upstreamLoading"
-                      />
-                      <button
-                        type="button"
-                        @click="toggleShowUpstreamOutboundApiKey"
-                        class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                      >
-                        <EyeOff v-if="showUpstreamOutboundApiKey" class="h-4 w-4" />
-                        <Eye v-else class="h-4 w-4" />
-                      </button>
-                    </div>
-                    <p class="text-xs text-gray-400">
-                      <template v-if="upstreamOutboundApiKeyStored">已入库；留空表示不修改。</template>
-                      <template v-else-if="upstreamOutboundApiKeySet">当前值可用但未入库；保存时会迁移或覆盖。</template>
-                      <template v-else>未设置。</template>
-                    </p>
-                  </div>
-                </div>
-
-                <div class="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 text-sm text-gray-600">
-                  <p class="font-medium text-gray-900">平台通用接口固定路径</p>
-                  <div class="mt-2 grid gap-2 md:grid-cols-3">
-                    <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">/api/upstream/health</code>
-                    <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">/api/upstream/cards/check</code>
-                    <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">/api/upstream/cards/redeem</code>
-                  </div>
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="inbound" class="mt-0 space-y-6">
-              <div class="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4 text-sm text-emerald-900">
-                <div class="flex items-start gap-2">
-                  <div class="mt-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500"></div>
-                  <div class="space-y-1">
-                    <p class="font-semibold">入站接口会把当前平台暴露成标准供应方。</p>
-                    <p class="text-emerald-800/80">其他平台可以用固定路径请求你的卡密查询与兑换能力；真实兑换码和下游映射码都可以通过这里入站对接。</p>
-                  </div>
-                </div>
-              </div>
-
-              <div class="space-y-2">
-                <div class="flex items-center gap-2">
-                  <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">入站接口开关</Label>
-                  <InfoTooltip content="启用后，外部平台可通过标准路径请求当前平台的健康检查、卡密校验和卡密兑换接口。" width-class="w-80" />
-                </div>
-                <Select v-model="upstreamApiEnabled" :disabled="upstreamLoading">
-                  <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
-                    <SelectValue placeholder="选择状态" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="true">启用</SelectItem>
-                    <SelectItem value="false">禁用</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div class="space-y-4">
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <p class="text-sm font-semibold text-gray-900">下游域名与入站 API Key</p>
-                    <p class="text-xs text-gray-500">建议每个下游实例单独分配一条规则，域名按主机名精确匹配。</p>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-10 rounded-xl"
-                    :disabled="upstreamLoading"
-                    @click="addUpstreamInboundClient"
-                  >
-                    <Plus class="mr-2 h-4 w-4" />
-                    新增规则
-                  </Button>
-                </div>
-
-                <div
-                  v-for="(client, index) in upstreamInboundClients"
-                  :key="client.id || `upstream-inbound-${index}`"
-                  class="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 space-y-4"
-                >
-                  <div class="flex items-start justify-between gap-3">
-                    <div class="space-y-1">
-                      <p class="font-medium text-gray-900">下游规则 {{ index + 1 }}</p>
-                      <p class="text-xs text-gray-500">
-                        <template v-if="client.legacy">这是旧单 API Key 自动迁移出来的默认规则，保存后会转成新的多域名配置。</template>
-                        <template v-else>域名支持填写 `partner.example.com` 或完整 URL，保存时会自动规范化成主机名。</template>
-                      </p>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      class="h-9 rounded-xl px-3 text-gray-600"
-                      :disabled="upstreamLoading"
-                      @click="removeUpstreamInboundClient(index)"
-                    >
-                      <Trash2 class="h-4 w-4" />
-                    </Button>
-                  </div>
-
-                  <div class="grid gap-4 lg:grid-cols-2">
-                    <div class="space-y-2">
-                      <div class="flex items-center gap-2">
-                        <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">下游域名</Label>
-                        <InfoTooltip content="填写下游实例自己的访问域名。留空表示默认规则，会匹配所有没有单独配置的下游。" width-class="w-80" />
-                      </div>
-                      <Input
-                        v-model="client.domain"
-                        type="text"
-                        placeholder="partner.example.com"
-                        class="h-11 bg-white border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                        :disabled="upstreamLoading"
-                      />
-                      <p class="text-xs text-gray-400">留空表示默认规则；推荐优先为每个下游实例填写唯一域名。</p>
-                    </div>
-
-                    <div class="space-y-2">
-                      <div class="flex items-center gap-2">
-                        <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">入站 API Key</Label>
-                        <InfoTooltip content="请求方需要在请求头携带 X-Upstream-Key。每个下游建议生成独立密钥，便于单独轮换与停用。" width-class="w-80" />
-                      </div>
-                      <div class="relative">
-                        <Input
-                          v-model="client.apiKey"
-                          :type="client.showApiKey ? 'text' : 'password'"
-                          placeholder="留空表示不修改"
-                          class="h-11 pr-10 bg-white border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                          :disabled="upstreamLoading"
-                        />
-                        <button
-                          type="button"
-                          @click="toggleShowUpstreamInboundClientApiKey(index)"
-                          class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                        >
-                          <EyeOff v-if="client.showApiKey" class="h-4 w-4" />
-                          <Eye v-else class="h-4 w-4" />
-                        </button>
-                      </div>
-                      <p class="text-xs text-gray-400">
-                        <template v-if="client.apiKeyStored">已入库；留空表示不修改。</template>
-                        <template v-else-if="client.apiKeySet">当前值可用但未入库；保存时会迁移或覆盖。</template>
-                        <template v-else>未设置。</template>
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 text-sm text-gray-600">
-                <div class="flex items-center gap-2">
-                  <p class="font-medium text-gray-900">固定入站路径</p>
-                  <InfoTooltip content="这三条路径由平台统一维护，外部对接方只需要按标准路径接入即可；下游映射码也直接走这里。" width-class="w-72" />
-                </div>
-                <div class="mt-3 grid gap-2 md:grid-cols-3">
-                  <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">GET /api/upstream/health</code>
-                  <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">POST /api/upstream/cards/check</code>
-                  <code class="rounded-lg bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">POST /api/upstream/cards/redeem</code>
-                </div>
-              </div>
-            </TabsContent>
-          </Tabs>
-
-          <div v-if="upstreamError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ upstreamError }}
-          </div>
-
-          <div v-if="upstreamSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ upstreamSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="upstreamLoading"
-              @click="loadUpstreamSettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="upstreamLoading"
-              @click="saveUpstreamSettings"
-            >
-              {{ upstreamLoading ? '保存中...' : '保存上下游接口配置' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      </template>
-
-      <template v-if="settingsSubTab === 'billing'">
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">ZPAY 支付配置</CardTitle>
-          <CardDescription class="text-gray-500">用于购买下单与回调验签（保存后实时生效）。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="grid gap-4 lg:grid-cols-3">
-            <div class="space-y-2 lg:col-span-1">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Base URL</Label>
-              <Input
-                v-model="zpayBaseUrl"
-                type="text"
-                placeholder="https://zpayz.cn"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="zpayLoading"
-              />
-              <p class="text-xs text-gray-400">示例：https://zpayz.cn（无需以 / 结尾）</p>
-            </div>
-            <div class="space-y-2 lg:col-span-1">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">PID</Label>
-              <Input
-                v-model="zpayPid"
-                type="text"
-                placeholder="ZPAY PID"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="zpayLoading"
-              />
-              <p class="text-xs text-gray-400">留空表示不启用支付。</p>
-            </div>
-            <div class="space-y-2 lg:col-span-1">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">KEY</Label>
-              <div class="relative">
-                <Input
-                  v-model="zpayKey"
-                  :type="showZpayKey ? 'text' : 'password'"
-                  placeholder="留空表示不修改"
-                  class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                  :disabled="zpayLoading"
-                />
-                <button
-                  type="button"
-                  @click="toggleShowZpayKey"
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  <EyeOff v-if="showZpayKey" class="h-4 w-4" />
-                  <Eye v-else class="h-4 w-4" />
-                </button>
-              </div>
-              <p class="text-xs text-gray-400">
-                <template v-if="zpayKeyStored">KEY 已入库；留空表示不修改。</template>
-                <template v-else-if="zpayKeySet">KEY 未入库；保存时可从 .env 自动迁移或在此重新填写。</template>
-                <template v-else>未设置 KEY。</template>
-              </p>
-            </div>
-          </div>
-
-          <div v-if="zpayError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ zpayError }}
-          </div>
-
-          <div v-if="zpaySuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ zpaySuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="zpayLoading"
-              @click="loadZpaySettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="zpayLoading"
-              @click="saveZpaySettings"
-            >
-              {{ zpayLoading ? '保存中...' : '保存 ZPAY 配置' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      </template>
-
-      <template v-if="settingsSubTab === 'integrations'">
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">Cloudflare Turnstile 配置</CardTitle>
-          <CardDescription class="text-gray-500">用于候车室加入队列的人机验证（保存后实时生效）。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="text-xs text-gray-500">
-            当前状态：<span class="font-semibold">{{ turnstileEnabled ? '已启用' : '未启用' }}</span>
-            <span class="text-gray-400">（需同时配置 Site Key + Secret Key）</span>
-          </div>
-
-          <div class="grid gap-4 lg:grid-cols-2">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Site Key</Label>
-              <Input
-                v-model="turnstileSiteKey"
-                type="text"
-                placeholder="0x..."
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="turnstileLoading"
-              />
-              <p class="text-xs text-gray-400">留空表示禁用人机验证。</p>
-            </div>
-
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Secret Key</Label>
-              <div class="relative">
-                <Input
-                  v-model="turnstileSecretKey"
-                  :type="showTurnstileSecretKey ? 'text' : 'password'"
-                  placeholder="留空表示不修改"
-                  class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                  :disabled="turnstileLoading"
-                />
-                <button
-                  type="button"
-                  @click="toggleShowTurnstileSecretKey"
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  <EyeOff v-if="showTurnstileSecretKey" class="h-4 w-4" />
-                  <Eye v-else class="h-4 w-4" />
-                </button>
-              </div>
-              <p class="text-xs text-gray-400">
-                <template v-if="turnstileSecretStored">Secret Key 已入库；留空表示不修改。</template>
-                <template v-else-if="turnstileSecretSet">Secret Key 未入库；保存时可从 .env 自动迁移或在此重新填写。</template>
-                <template v-else>未设置 Secret Key。</template>
-              </p>
-            </div>
-          </div>
-
-          <div v-if="turnstileError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ turnstileError }}
-          </div>
-
-          <div v-if="turnstileSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ turnstileSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="turnstileLoading"
-              @click="loadTurnstileSettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="turnstileLoading"
-              @click="saveTurnstileSettings"
-            >
-              {{ turnstileLoading ? '保存中...' : '保存 Turnstile 配置' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-        <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-          <CardTitle class="text-xl font-bold text-gray-900">Telegram Bot 配置</CardTitle>
-          <CardDescription class="text-gray-500">用于 Telegram 兑换机器人与系统通知。</CardDescription>
-        </CardHeader>
-        <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-          <div class="grid gap-4 lg:grid-cols-2">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Bot Token</Label>
-              <div class="relative">
-                <Input
-                  v-model="telegramBotToken"
-                  :type="showTelegramBotToken ? 'text' : 'password'"
-                  placeholder="留空表示不修改"
-                  class="h-11 pr-10 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                  :disabled="telegramLoading"
-                />
-                <button
-                  type="button"
-                  @click="toggleShowTelegramBotToken"
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  <EyeOff v-if="showTelegramBotToken" class="h-4 w-4" />
-                  <Eye v-else class="h-4 w-4" />
-                </button>
-              </div>
-              <p class="text-xs text-gray-400">
-                <template v-if="telegramTokenStored">Token 已入库；留空表示不修改。</template>
-                <template v-else-if="telegramTokenSet">Token 未入库；保存时可从 .env 自动迁移或在此重新填写。</template>
-                <template v-else>未设置 Token。</template>
-              </p>
-            </div>
-
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">允许的用户 ID (可选)</Label>
-              <Input
-                v-model="telegramAllowedUserIds"
-                type="text"
-                placeholder="123456,789012"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="telegramLoading"
-              />
-              <p class="text-xs text-gray-400">留空表示对所有用户开放；填写后仅允许这些 Telegram User ID。</p>
-            </div>
-          </div>
-
-          <div class="grid gap-4 lg:grid-cols-3">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">通知开关</Label>
-              <Select v-model="telegramNotifyEnabled" :disabled="telegramLoading">
-                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all">
-                  <SelectValue placeholder="选择" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="true">启用通知</SelectItem>
-                  <SelectItem value="false">禁用通知</SelectItem>
-                </SelectContent>
-              </Select>
-              <p class="text-xs text-gray-400">
-                <template v-if="telegramNotifyEnabledStored">已入库。</template>
-                <template v-else>未入库（当前值可能来自 .env）。</template>
-              </p>
-            </div>
-
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">通知 chat_id (可选)</Label>
-              <Input
-                v-model="telegramNotifyChatIds"
-                type="text"
-                placeholder="-1001234567890,@channelname"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="telegramLoading"
-              />
-              <p class="text-xs text-gray-400">
-                <template v-if="telegramNotifyChatIdsStored">已入库。</template>
-                <template v-else>未入库（当前值可能来自 .env）。</template>
-                留空则默认发送给「允许的用户 ID」；支持用户ID/群ID（-100...）/频道（@xxx），逗号分隔。
-              </p>
-            </div>
-
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">通知超时（毫秒）</Label>
-              <Input
-                v-model="telegramNotifyTimeoutMs"
-                type="text"
-                placeholder="8000"
-                class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all font-mono text-sm"
-                :disabled="telegramLoading"
-              />
-              <p class="text-xs text-gray-400">
-                <template v-if="telegramNotifyTimeoutMsStored">已入库。</template>
-                <template v-else>未入库（当前值可能来自 .env）。</template>
-              </p>
-            </div>
-          </div>
-
-          <div v-if="telegramError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-            {{ telegramError }}
-          </div>
-
-          <div v-if="telegramSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-            {{ telegramSuccess }}
-          </div>
-
-          <div class="flex flex-col sm:flex-row gap-3">
-            <Button
-              type="button"
-              variant="outline"
-              class="w-full sm:w-auto h-11 rounded-xl"
-              :disabled="telegramLoading"
-              @click="loadTelegramSettings"
-            >
-              刷新
-            </Button>
-            <Button
-              type="button"
-              class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-              :disabled="telegramLoading"
-              @click="saveTelegramSettings"
-            >
-              {{ telegramLoading ? '保存中...' : '保存 Telegram 配置' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      </template>
-
-      <template v-if="settingsSubTab === 'billing'">
-      <!-- 积分提现设置 -->
-      <Card v-if="isSuperAdmin" class="bg-white rounded-[32px] border border-gray-100 shadow-sm overflow-hidden flex flex-col lg:col-span-2">
-	          <CardHeader class="border-b border-gray-50 bg-gray-50/30 px-6 py-5 sm:px-8 sm:py-6">
-	            <CardTitle class="text-xl font-bold text-gray-900">积分提现设置</CardTitle>
-	            <CardDescription class="text-gray-500">配置返现比例与提现门槛（保存后实时生效）。</CardDescription>
-	          </CardHeader>
-	          <CardContent class="p-6 sm:p-8 space-y-6 flex-1">
-	            <div class="grid gap-4 lg:grid-cols-3">
-	              <div class="space-y-2">
-	                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">返现比例：积分</Label>
-                <Input
-                  v-model="pointsWithdrawRatePoints"
-                  type="text"
-                  placeholder="1"
-                  class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all"
-                  :disabled="pointsWithdrawLoading"
-                />
-              </div>
-              <div class="space-y-2">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">返现比例：金额（元）</Label>
-                <Input
-                  v-model="pointsWithdrawRateCashYuan"
-                  type="text"
-                  placeholder="1.00"
-                  class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all"
-                  :disabled="pointsWithdrawLoading"
-                />
-              </div>
-              <div class="space-y-2">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">最低提现金额（元）</Label>
-                <Input
-                  v-model="pointsWithdrawMinCashYuan"
-                  type="text"
-                  placeholder="10.00"
-                  class="h-11 bg-gray-50 border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-100 focus:border-blue-500 transition-all"
-                  :disabled="pointsWithdrawLoading"
-                />
-              </div>
-            </div>
-
-            <div class="text-xs text-gray-500">
-              当前规则：{{ pointsWithdrawRatePoints }} 积分 = {{ pointsWithdrawRateCashYuan }} 元；最低提现约 {{ pointsWithdrawMinPoints ?? '-' }} 积分；步进 {{ pointsWithdrawStepPoints ?? '-' }} 积分
-            </div>
-
-            <div v-if="pointsWithdrawError" class="rounded-xl bg-red-50 p-4 text-red-600 border border-red-100 text-sm font-medium">
-              {{ pointsWithdrawError }}
-            </div>
-
-            <div v-if="pointsWithdrawSuccess" class="rounded-xl bg-green-50 p-4 text-green-600 border border-green-100 text-sm font-medium">
-              {{ pointsWithdrawSuccess }}
-            </div>
-
-	            <div class="flex flex-col sm:flex-row gap-3">
-	              <Button
-	                type="button"
-	                variant="outline"
-	                class="w-full sm:w-auto h-11 rounded-xl"
-	                :disabled="pointsWithdrawLoading"
-	                @click="loadPointsWithdrawSettings"
-	              >
-	                刷新
-	              </Button>
-	              <Button
-	                type="button"
-	                class="w-full sm:flex-1 h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5"
-	                :disabled="pointsWithdrawLoading"
-	                @click="savePointsWithdrawSettings"
-	              >
-	                {{ pointsWithdrawLoading ? '保存中...' : '保存设置' }}
-              </Button>
-            </div>
-          </CardContent>
-      </Card>
-      </template>
-
-      <Dialog v-model:open="channelDialogOpen">
-        <DialogContent class="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle class="text-xl font-bold text-gray-900">{{ channelDialogMode === 'create' ? '新增渠道' : '编辑渠道' }}</DialogTitle>
-            <DialogDescription class="text-gray-500">渠道 key 仅支持小写字母/数字/连字符。</DialogDescription>
-          </DialogHeader>
-
-          <div class="space-y-4 py-4">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道 Key</Label>
-              <Input v-model="channelFormKey" :disabled="channelDialogMode === 'edit'" placeholder="douyin" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道名称</Label>
-              <Input v-model="channelFormName" placeholder="抖音渠道" class="h-11 bg-gray-50 border-gray-200 rounded-xl text-sm" />
-            </div>
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div class="space-y-2">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">兑换模式</Label>
-                <Select v-model="channelFormRedeemMode">
-                  <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
-                    <SelectValue placeholder="请选择兑换模式" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="option in channelRedeemModeOptions" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div class="space-y-2">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">履约 Provider</Label>
-                <Select v-model="channelFormProviderType" :disabled="channelFormProviderOptions.length <= 1">
-                  <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
-                    <SelectValue placeholder="请选择 Provider" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="option in channelFormProviderOptions" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p class="text-xs text-gray-400">
-                  <template v-if="channelFormRedeemMode === 'external-card'">外部卡密渠道可选择自定义接口或平台通用接口。</template>
-                  <template v-else>非 external-card 渠道固定使用本地履约。</template>
-                </p>
-              </div>
-            </div>
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">允许回退通用码</p>
-                <p class="text-xs text-gray-500">开启后可在该渠道入口使用通用渠道兑换码。</p>
-              </div>
-              <input type="checkbox" v-model="channelFormAllowFallback" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
-            </div>
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">允许参与下游售码</p>
-                <p class="text-xs text-gray-500">开启后，该渠道下可售兑换码会进入 /downstream 共享库存。</p>
-              </div>
-              <input type="checkbox" v-model="channelFormAllowDownstreamSale" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
-            </div>
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">启用</p>
-              </div>
-              <input type="checkbox" v-model="channelFormIsActive" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">排序（sortOrder）</Label>
-              <Input v-model="channelFormSortOrder" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-            </div>
-
-            <div class="flex flex-col sm:flex-row gap-3 pt-2">
-              <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" @click="channelDialogOpen = false">
-                取消
-              </Button>
-              <Button type="button" class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="submitChannelDialog">
-                保存
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog v-model:open="purchaseProductDialogOpen">
-        <DialogContent class="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle class="text-xl font-bold text-gray-900">{{ purchaseProductDialogMode === 'create' ? '新增商品' : '编辑商品' }}</DialogTitle>
-            <DialogDescription class="text-gray-500">codeChannels 按优先级用英文逗号分隔，例如：paypal,common</DialogDescription>
-          </DialogHeader>
-
-          <div class="space-y-4 py-4">
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">商品 Key</Label>
-              <Input v-model="purchaseProductFormKey" :disabled="purchaseProductDialogMode === 'edit'" placeholder="warranty_90" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">名称</Label>
-              <Input v-model="purchaseProductFormName" placeholder="质保 90 天" class="h-11 bg-gray-50 border-gray-200 rounded-xl text-sm" />
-            </div>
-            <div class="grid grid-cols-2 gap-3">
-              <div class="space-y-2">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">价格（amount）</Label>
-                <Input v-model="purchaseProductFormAmount" placeholder="15.00" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-              </div>
-              <div class="space-y-2">
-                <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">服务期（天）</Label>
-                <Input v-model="purchaseProductFormServiceDays" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-              </div>
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">订单类型（orderType）</Label>
-              <Select v-model="purchaseProductFormOrderType">
-                <SelectTrigger class="h-11 bg-gray-50 border-gray-200 rounded-xl">
-                  <SelectValue placeholder="请选择" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="warranty">warranty</SelectItem>
-                  <SelectItem value="no_warranty">no_warranty</SelectItem>
-                  <SelectItem value="anti_ban">anti_ban</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">渠道策略（codeChannels）</Label>
-              <Input v-model="purchaseProductFormCodeChannels" placeholder="paypal,common" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-              <p class="text-xs text-gray-400">可用渠道：{{ channels.map(c => c.key).join(', ') || '（暂无）' }}</p>
-            </div>
-            <div class="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
-              <div class="space-y-1">
-                <p class="font-medium text-gray-900">上架</p>
-              </div>
-              <input type="checkbox" v-model="purchaseProductFormIsActive" class="w-6 h-6 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500" />
-            </div>
-            <div class="space-y-2">
-              <Label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">排序（sortOrder）</Label>
-              <Input v-model="purchaseProductFormSortOrder" type="number" class="h-11 bg-gray-50 border-gray-200 rounded-xl font-mono text-sm" />
-            </div>
-
-            <div class="flex flex-col sm:flex-row gap-3 pt-2">
-              <Button type="button" variant="outline" class="w-full sm:w-auto h-11 px-4 border-gray-200 rounded-xl" @click="purchaseProductDialogOpen = false">
-                取消
-              </Button>
-              <Button type="button" class="w-full h-11 rounded-xl bg-black hover:bg-gray-800 text-white shadow-lg shadow-black/5" @click="submitPurchaseProductDialog">
-                保存
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-          </div>
+          <label class="flex items-center gap-3 text-sm text-gray-700">
+            <input v-model="channelFormAllowFallback" type="checkbox" class="rounded border-gray-300" />
+            允许回退到 common 渠道
+          </label>
         </div>
-      </div>
-    </TabsContent>
-
-    <TabsContent v-if="isSuperAdmin" value="announcements" class="mt-0">
-      <AnnouncementAdminPanel />
-    </TabsContent>
-  </Tabs>
+        <div class="flex justify-end gap-3 pt-4">
+          <Button variant="outline" class="rounded-xl" @click="channelDialogOpen = false">取消</Button>
+          <Button class="rounded-xl bg-black hover:bg-gray-800 text-white" @click="saveChannel">保存</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  </div>
 </template>

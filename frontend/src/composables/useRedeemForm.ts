@@ -131,8 +131,7 @@ export const useRedeemForm = (channel: MaybeRef<string> = 'common', options: Use
       })
 
       const response = await redemptionCodeService.redeem(
-        payload as { email: string; code: string; channel?: string; redeemerUid?: string },
-        options?.linuxDoSessionToken ? { linuxDoSessionToken: options.linuxDoSessionToken } : undefined
+        payload as { email: string; code: string; channel?: string; redeemerUid?: string }
       )
 
       const responseData = response.data?.data || {}
